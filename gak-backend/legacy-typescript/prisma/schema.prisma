@@ -1,0 +1,431 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SyncStatus {
+  synced
+  pending
+  failed
+}
+
+enum BehaviorDomain {
+  fitness
+  academic
+  nutrition
+}
+
+enum BehaviorAction {
+  done
+  skipped
+  submitted
+  missed
+}
+
+enum EmailSource {
+  gmail
+}
+
+model AppUser {
+  id                 String   @id @default(uuid())
+  fullName           String
+  email              String   @unique
+  passwordHash       String?
+  createdAt          DateTime @default(now())
+
+  googleId           String?  @unique
+  googleAccessToken  String?
+  googleRefreshToken String?
+  googleTokenExpiry  DateTime?
+
+  attendanceRecords  AttendanceRecord[]
+  marksRecords       MarksRecord[]
+  academicGoals      AcademicGoal[]
+
+  workoutSessions    WorkoutSession[]
+  workoutActions     WorkoutAction[]
+  workoutPlans       WorkoutPlan[]
+  activityLogs       ActivityLog[]
+  bodyMetrics        BodyMetric[]
+
+  foodLogs           FoodLog[]
+
+  calendarEvents     CalendarEvent[]
+  integrationStatus  IntegrationStatus[]
+
+  behaviorLogs       UserBehaviorLog[]
+
+  fitnessMetrics     FitnessBehaviorMetrics?
+  academicMetrics    AcademicBehaviorMetrics?
+  nutritionMetrics   NutritionBehaviorMetrics?
+  behaviorSummary    UserBehaviorSummary?
+  recommendations    UserRecommendation[]
+  emailEvents        EmailEvent[]
+
+  @@map("app_user")
+}
+
+model University {
+  id             String   @id
+  universityName String
+  campuses       Campus[]
+  academicUnits  AcademicUnit[]
+
+  @@map("university")
+}
+
+model Campus {
+  id           String       @id
+  campusName   String
+  universityId String
+  university   University   @relation(fields: [universityId], references: [id])
+  academicUnits AcademicUnit[]
+
+  @@map("campus")
+}
+
+model AcademicUnit {
+  id            String   @id
+  unitName      String
+  unitType      String?
+  description   String?
+  campusId      String
+  universityId  String
+  campus        Campus      @relation(fields: [campusId], references: [id])
+  university    University  @relation(fields: [universityId], references: [id])
+  subjects      Subject[]
+  sections      Section[]
+
+  @@map("academic_unit")
+}
+
+model Subject {
+  id                          String   @id
+  subjectName                 String
+  credits                     Int?
+  minimumAttendancePercentage Float?
+  academicUnitId              String?
+  program                     String?
+  semester                    Int?
+
+  academicUnit AcademicUnit? @relation(fields: [academicUnitId], references: [id])
+  attendanceRecords AttendanceRecord[]
+  marksRecords      MarksRecord[]
+  academicGoals     AcademicGoal[]
+  timetableEntries  TimetableEntry[]
+
+  @@map("subject")
+}
+
+model Section {
+  id             String  @id
+  sectionName    String
+  academicYear   Int?
+  semester       Int?
+  program        String?
+  academicUnitId String?
+
+  academicUnit AcademicUnit? @relation(fields: [academicUnitId], references: [id])
+  timetableEntries TimetableEntry[]
+
+  @@map("section")
+}
+
+model TimetableEntry {
+  id          String   @id
+  sectionId   String?
+  subjectId   String?
+  dayOrder    Int?
+  startTime   DateTime?
+  endTime     DateTime?
+
+  section     Section? @relation(fields: [sectionId], references: [id])
+  subject     Subject? @relation(fields: [subjectId], references: [id])
+  attendanceRecords AttendanceRecord[]
+
+  @@map("timetable_entry")
+}
+
+model AttendanceRecord {
+  id               String   @id
+  userId           String
+  subjectId        String
+  timetableEntryId String?
+  classDate        DateTime
+  attended         Boolean
+
+  user             AppUser      @relation(fields: [userId], references: [id])
+  subject          Subject      @relation(fields: [subjectId], references: [id])
+  timetableEntry   TimetableEntry? @relation(fields: [timetableEntryId], references: [id])
+
+  @@index([userId])
+  @@map("attendance_record")
+}
+
+model MarksRecord {
+  id            String   @id
+  userId        String
+  subjectId     String
+  componentType String
+  score         Float
+  maxScore      Float
+  recordedAt    DateTime @default(now())
+
+  user          AppUser  @relation(fields: [userId], references: [id])
+  subject       Subject  @relation(fields: [subjectId], references: [id])
+
+  @@index([userId])
+  @@map("marks_record")
+}
+
+model AcademicGoal {
+  id           String   @id
+  userId       String
+  subjectId    String
+  goalType     String
+  targetValue  Float
+  deadlineDate DateTime
+  status       String
+
+  user         AppUser  @relation(fields: [userId], references: [id])
+  subject      Subject  @relation(fields: [subjectId], references: [id])
+
+  @@index([userId])
+  @@map("academic_goal")
+}
+
+model WorkoutPlan {
+  id        String   @id @default(uuid())
+  userId    String
+  source    String?
+  createdAt DateTime @default(now())
+
+  user      AppUser  @relation(fields: [userId], references: [id])
+  sessions  WorkoutSession[]
+
+  @@map("workout_plan")
+}
+
+model WorkoutSession {
+  id                 String     @id
+  planId             String?
+  userId             String
+  workoutDate        DateTime
+  workoutType        String
+  muscleGroup        String
+  caloriesBurned     Float      @default(0)
+  durationMinutes    Int        @default(30)
+  googleFitSessionId String?
+  syncStatus         SyncStatus @default(pending)
+
+  plan               WorkoutPlan? @relation(fields: [planId], references: [id])
+  user               AppUser      @relation(fields: [userId], references: [id])
+  actions            WorkoutAction[]
+
+  @@index([userId])
+  @@map("workout_session")
+}
+
+model WorkoutAction {
+  id          String   @id
+  sessionId   String
+  userId      String
+  status      String
+  performedAt DateTime @default(now())
+
+  session     WorkoutSession @relation(fields: [sessionId], references: [id])
+  user        AppUser        @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("workout_action")
+}
+
+model ActivityLog {
+  id             String   @id
+  userId         String
+  activityType   String
+  caloriesBurned Float
+  duration       Int
+  startTime      DateTime
+  endTime        DateTime
+  source         String
+
+  user AppUser @relation(fields: [userId], references: [id])
+
+  @@map("activity_log")
+}
+
+model BodyMetric {
+  id                String   @id @default(uuid())
+  userId            String
+  height            Float?
+  weight            Float?
+  bodyFatPercentage Float?
+  recordedTimestamp DateTime @default(now())
+
+  user AppUser @relation(fields: [userId], references: [id])
+
+  @@index([userId, recordedTimestamp])
+  @@map("body_metric")
+}
+
+model FoodLog {
+  id           String   @id
+  userId       String
+  logDate      DateTime
+  totalCalories Float
+
+  user         AppUser  @relation(fields: [userId], references: [id])
+  items        FoodLogItem[]
+
+  @@index([userId, logDate])
+  @@map("food_log")
+}
+
+model FoodLogItem {
+  id         String  @id
+  foodLogId  String
+  foodName   String
+  quantity   Float
+  calories   Float
+  protein    Float
+  carbs      Float
+  fats       Float
+
+  foodLog    FoodLog @relation(fields: [foodLogId], references: [id], onDelete: Cascade)
+
+  @@index([foodLogId])
+  @@map("food_log_item")
+}
+
+model CalendarEvent {
+  id            String     @id @default(uuid())
+  userId         String
+  eventDate      DateTime
+  eventType      String
+  title          String
+  googleEventId  String?
+  syncStatus     SyncStatus @default(pending)
+
+  user AppUser @relation(fields: [userId], references: [id])
+
+  @@index([userId, eventDate])
+  @@map("calendar_event")
+}
+
+model IntegrationStatus {
+  id              String   @id @default(uuid())
+  userId          String
+  integrationType String
+  status          String
+  lastSyncedAt    DateTime?
+
+  user AppUser @relation(fields: [userId], references: [id])
+
+  @@index([userId, integrationType])
+  @@map("integration_status")
+}
+
+model UserBehaviorLog {
+  id                 String         @id @default(uuid())
+  userId             String
+  domain             BehaviorDomain
+  entityId           String
+  action             BehaviorAction
+  timestamp          DateTime       @default(now())
+  dayOfWeek          Int
+  hourOfDay          Int
+  examWeek           Boolean        @default(false)
+  attendancePressure Boolean        @default(false)
+
+  user AppUser @relation(fields: [userId], references: [id])
+
+  @@index([userId, domain, timestamp])
+  @@map("user_behavior_log")
+}
+
+model FitnessBehaviorMetrics {
+  userId                 String   @id
+  skipRate               Float
+  consistencyScore       Int
+  bestTimeSlot           Int
+  worstDay               Int
+  examWeekDropPercentage Float
+  lastUpdated            DateTime
+
+  user AppUser @relation(fields: [userId], references: [id])
+
+  @@map("fitness_behavior_metrics")
+}
+
+model AcademicBehaviorMetrics {
+  userId              String   @id
+  avgAttendance       Float
+  riskSubjectCount    Int
+  examWeekStressIndex Float
+  goalAdherenceScore  Float
+  lastUpdated         DateTime
+
+  user AppUser @relation(fields: [userId], references: [id])
+
+  @@map("academic_behavior_metrics")
+}
+
+model NutritionBehaviorMetrics {
+  userId              String   @id
+  avgDailyCalories    Float
+  overLimitDays       Int
+  proteinDeficitRatio Float
+  loggingConsistency  Float
+  lastUpdated         DateTime
+
+  user AppUser @relation(fields: [userId], references: [id])
+
+  @@map("nutrition_behavior_metrics")
+}
+
+model UserBehaviorSummary {
+  userId                 String   @id
+  academicScoreIndex     Float
+  fitnessDisciplineIndex Float
+  nutritionBalanceIndex  Float
+  overallConsistencyIndex Float
+  lastComputed           DateTime
+
+  user AppUser @relation(fields: [userId], references: [id])
+
+  @@map("user_behavior_summary")
+}
+
+model UserRecommendation {
+  id                 String   @id @default(uuid())
+  userId             String
+  domain             String
+  recommendationText String
+  generatedAt        DateTime @default(now())
+  acknowledged       Boolean  @default(false)
+
+  user AppUser @relation(fields: [userId], references: [id])
+
+  @@index([userId, generatedAt])
+  @@map("user_recommendations")
+}
+
+model EmailEvent {
+  id              String      @id @default(uuid())
+  userId          String
+  subject         String
+  parsedDeadline  DateTime?
+  source          EmailSource
+  confidenceScore Float
+  createdAt       DateTime    @default(now())
+
+  user AppUser @relation(fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@map("email_event")
+}
