@@ -1,12 +1,60 @@
 const integrationService = require("../services/integration.service");
 
+function isLocalHost(hostname) {
+  return hostname === "localhost" || hostname === "127.0.0.1";
+}
+
+function normalizeFrontendBaseUrl(rawUrl) {
+  try {
+    const url = new URL(String(rawUrl || "").trim());
+    return `${url.origin}`;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function getSafeFrontendBaseUrl() {
+  const configured = normalizeFrontendBaseUrl(process.env.FRONTEND_URL || "http://localhost:8080");
+  const allowed = String(process.env.FRONTEND_ALLOWED_REDIRECTS || process.env.FRONTEND_URL || "")
+    .split(",")
+    .map((value) => normalizeFrontendBaseUrl(value))
+    .filter(Boolean);
+
+  const runtime = String(process.env.NODE_ENV || "").toLowerCase();
+  const inAllowlist = configured && (allowed.length === 0 || allowed.includes(configured));
+
+  if (configured && inAllowlist) {
+    const parsed = new URL(configured);
+    if (runtime !== "production" || parsed.protocol === "https:" || isLocalHost(parsed.hostname)) {
+      return configured;
+    }
+  }
+
+  if (allowed.length > 0) {
+    return allowed[0];
+  }
+
+  return "http://localhost:8080";
+}
+
+function isOAuthConfigErrorMessage(message) {
+  const text = String(message || "");
+  return (
+    text.includes("Google OAuth config missing")
+    || text.includes("GOOGLE_REDIRECT_URI")
+    || text.includes("GOOGLE_ALLOWED_REDIRECT_URIS")
+    || text.includes("https in production")
+  );
+}
+
 async function getGoogleAuthUrl(req, res, next) {
   try {
     const authUrl = await integrationService.startGoogleOAuth(req.user.userId);
     return res.status(200).json({ authUrl });
   } catch (error) {
-    if (String(error.message || "").includes("Google OAuth config missing")) {
-      return res.status(400).json({ message: error.message });
+    const message = String(error.message || "");
+    if (isOAuthConfigErrorMessage(message)) {
+      return res.status(400).json({ message });
     }
     return next(error);
   }
@@ -23,8 +71,9 @@ async function handleGoogleCallback(req, res, next) {
     const result = await integrationService.completeGoogleOAuth(code, req.user.userId);
     return res.status(200).json(result);
   } catch (error) {
-    if (String(error.message || "").includes("Google OAuth config missing")) {
-      return res.status(400).json({ message: error.message });
+    const message = String(error.message || "");
+    if (isOAuthConfigErrorMessage(message) || message.includes("Invalid OAuth state") || message.includes("Expired OAuth state")) {
+      return res.status(400).json({ message });
     }
     return next(error);
   }
@@ -34,7 +83,7 @@ async function handleGoogleCallbackPublic(req, res, next) {
   try {
     const code = req.query.code;
     const state = req.query.state;
-    const frontendUrl = String(process.env.FRONTEND_URL || "http://localhost:8080").replace(/\/$/, "");
+    const frontendUrl = getSafeFrontendBaseUrl();
 
     if (!code) {
       return res.redirect(`${frontendUrl}/profile?google=error&reason=missing_code`);
@@ -43,7 +92,7 @@ async function handleGoogleCallbackPublic(req, res, next) {
     await integrationService.completeGoogleOAuthFromState(code, state);
     return res.redirect(`${frontendUrl}/profile?google=connected`);
   } catch (error) {
-    const frontendUrl = String(process.env.FRONTEND_URL || "http://localhost:8080").replace(/\/$/, "");
+    const frontendUrl = getSafeFrontendBaseUrl();
     const reason = encodeURIComponent(String(error?.message || "oauth_failed"));
     return res.redirect(`${frontendUrl}/profile?google=error&reason=${reason}`);
   }
@@ -51,13 +100,20 @@ async function handleGoogleCallbackPublic(req, res, next) {
 
 async function createCalendarEvent(req, res, next) {
   try {
-    const { title, eventType, eventDate } = req.body;
+    const { title, eventType, eventDate, googleAccountId } = req.body;
+    const allowedTypes = ["academic", "fitness", "nutrition", "personal"];
 
     if (!title || !eventType || !eventDate) {
       return res.status(400).json({ message: "title, eventType, eventDate are required" });
     }
+    if (!allowedTypes.includes(String(eventType).toLowerCase())) {
+      return res.status(400).json({ message: "eventType must be one of academic, fitness, nutrition, personal" });
+    }
+    if (!/^\d{4}-\d{2}-\d{2}/.test(String(eventDate))) {
+      return res.status(400).json({ message: "eventDate must be ISO format (YYYY-MM-DD...)" });
+    }
 
-    const result = await integrationService.createCalendarEvent(req.user.userId, { title, eventType, eventDate });
+    const result = await integrationService.createCalendarEvent(req.user.userId, { title, eventType, eventDate, googleAccountId });
     return res.status(201).json(result);
   } catch (error) {
     return next(error);
@@ -82,9 +138,78 @@ async function getIntegrationStatus(req, res, next) {
   }
 }
 
+async function listGoogleAccounts(req, res, next) {
+  try {
+    const payload = await integrationService.listGoogleAccounts(req.user.userId);
+    return res.status(200).json(payload);
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function setPrimaryGoogleAccount(req, res, next) {
+  try {
+    const accountId = String(req.params.accountId || "");
+    if (!accountId) {
+      return res.status(400).json({ message: "accountId is required" });
+    }
+    const payload = await integrationService.setPrimaryGoogleAccount(req.user.userId, accountId);
+    return res.status(200).json(payload);
+  } catch (error) {
+    if (String(error.message || "").toLowerCase().includes("not found")) {
+      return res.status(404).json({ message: error.message });
+    }
+    return next(error);
+  }
+}
+
+async function disconnectGoogleAccount(req, res, next) {
+  try {
+    const accountId = String(req.params.accountId || "");
+    if (!accountId) {
+      return res.status(400).json({ message: "accountId is required" });
+    }
+    const payload = await integrationService.disconnectGoogleAccount(req.user.userId, accountId);
+    return res.status(200).json(payload);
+  } catch (error) {
+    const message = String(error.message || "");
+    if (message.toLowerCase().includes("not found")) {
+      return res.status(404).json({ message: error.message });
+    }
+    if (message.toLowerCase().includes("locked")) {
+      return res.status(409).json({ message: error.message });
+    }
+    return next(error);
+  }
+}
+
+async function setFitGoogleAccount(req, res, next) {
+  try {
+    const accountId = String(req.body?.accountId || "");
+    if (!accountId) {
+      return res.status(400).json({ message: "accountId is required" });
+    }
+    const payload = await integrationService.setFitGoogleAccount(req.user.userId, accountId);
+    return res.status(200).json(payload);
+  } catch (error) {
+    const message = String(error.message || "");
+    if (message.toLowerCase().includes("already selected")) {
+      return res.status(409).json({ message });
+    }
+    if (message.toLowerCase().includes("not found")) {
+      return res.status(404).json({ message });
+    }
+    if (message.toLowerCase().includes("required")) {
+      return res.status(400).json({ message });
+    }
+    return next(error);
+  }
+}
+
 async function parseGmail(req, res, next) {
   try {
-    const result = await integrationService.parseGmailForAcademicEvents(req.user.userId);
+    const accountId = req.body?.accountId || req.query?.accountId || null;
+    const result = await integrationService.parseGmailForAcademicEvents(req.user.userId, { accountId });
     return res.status(200).json(result);
   } catch (error) {
     return next(error);
@@ -137,6 +262,7 @@ async function syncAcademia(req, res, next) {
       String(error.message || "").includes("not connected")
       || String(error.message || "").includes("failed")
       || String(error.message || "").includes("Unable to fetch")
+      || String(error.message || "").toLowerCase().includes("captcha")
     ) {
       return res.status(400).json({ message: error.message });
     }
@@ -169,6 +295,10 @@ module.exports = {
   createCalendarEvent,
   listCalendarEvents,
   getIntegrationStatus,
+  listGoogleAccounts,
+  setPrimaryGoogleAccount,
+  setFitGoogleAccount,
+  disconnectGoogleAccount,
   parseGmail,
   pushWorkoutToFit,
   connectAcademia,

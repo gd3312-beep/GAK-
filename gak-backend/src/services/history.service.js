@@ -1,4 +1,5 @@
 const pool = require("../config/db");
+const marksModel = require("../models/marks.model");
 
 function pickAllowed(value, allowed, fallback) {
   const v = String(value || "").toLowerCase();
@@ -13,6 +14,112 @@ function isoDaysAgo(days) {
   const dt = new Date();
   dt.setDate(dt.getDate() - days);
   return toIsoDate(dt);
+}
+
+function average(values) {
+  if (!Array.isArray(values) || values.length === 0) return null;
+  const total = values.reduce((sum, v) => sum + Number(v || 0), 0);
+  return total / values.length;
+}
+
+function toDeltaDirection(delta) {
+  if (delta === null || delta === undefined) return "none";
+  if (Math.abs(delta) < 0.01) return "flat";
+  return delta > 0 ? "up" : "down";
+}
+
+function buildTrend(metric, currentValue, previousValue, suffix = "", betterWhenHigher = true) {
+  if (currentValue === null || previousValue === null) {
+    return {
+      metric,
+      currentValue,
+      previousValue,
+      delta: null,
+      direction: "none",
+      summary: "Not enough history yet to estimate upgrade or downgrade against your past."
+    };
+  }
+
+  const delta = Number((currentValue - previousValue).toFixed(2));
+  const direction = toDeltaDirection(delta);
+
+  if (direction === "flat") {
+    return {
+      metric,
+      currentValue,
+      previousValue,
+      delta,
+      direction,
+      summary: `This appears mostly stable vs your past (${previousValue.toFixed(1)}${suffix} to ${currentValue.toFixed(1)}${suffix}).`
+    };
+  }
+
+  const upgraded = betterWhenHigher ? delta > 0 : delta < 0;
+  const magnitude = Math.abs(delta).toFixed(1);
+  return {
+    metric,
+    currentValue,
+    previousValue,
+    delta,
+    direction,
+    summary: upgraded
+      ? `You appear to have upgraded by ${magnitude}${suffix} vs your earlier period.`
+      : `You might have downgraded by ${magnitude}${suffix} vs your earlier period.`
+  };
+}
+
+function toTopPercent(rank, totalUsers) {
+  if (!rank || !totalUsers || Number(totalUsers) < 3) {
+    return null;
+  }
+  return Math.max(1, Math.min(100, Math.round((Number(rank) / Number(totalUsers)) * 100)));
+}
+
+function standingBand(topPercent) {
+  if (topPercent === null || topPercent === undefined) return "No cohort data yet";
+  if (topPercent <= 10) return "Top 10%";
+  if (topPercent <= 20) return "Top 20%";
+  if (topPercent <= 30) return "Top 30%";
+  if (topPercent <= 50) return "Top 50%";
+  return "Below Top 50%";
+}
+
+async function getDomainStanding(userId, metricColumn) {
+  const safeMetric = String(metricColumn || "").trim();
+  if (!["academic_score_index", "fitness_discipline_index", "nutrition_balance_index"].includes(safeMetric)) {
+    return {
+      rank: null,
+      totalUsers: null,
+      topPercent: null,
+      band: "No cohort data yet"
+    };
+  }
+
+  const [rows] = await pool.execute(
+    `WITH ranked AS (
+      SELECT
+        user_id,
+        RANK() OVER (ORDER BY ${safeMetric} DESC) AS rank_value,
+        COUNT(*) OVER () AS total_users
+      FROM user_behavior_summary
+    )
+    SELECT rank_value, total_users
+    FROM ranked
+    WHERE user_id = ?`,
+    [userId]
+  );
+
+  const row = rows[0] || null;
+  const rank = row ? Number(row.rank_value) : null;
+  const totalUsers = row ? Number(row.total_users) : null;
+  const topPercent = toTopPercent(rank, totalUsers);
+
+  return {
+    rank,
+    totalUsers,
+    topPercent,
+    band: standingBand(topPercent)
+  };
 }
 
 async function getAcademicProfile(userId) {
@@ -38,15 +145,15 @@ function gradePointFromPct(pct) {
 function computeInsightsAcademic({ attendancePercent, cgpa }) {
   const insights = [];
   if (typeof attendancePercent === "number") {
-    if (attendancePercent < 65) insights.push("Attendance is critical. Prioritize classes until you recover above 75%.");
-    else if (attendancePercent < 75) insights.push("Attendance is below 75%. Avoid skipping near-term classes.");
-    else insights.push("Attendance is in a safe zone. Maintain consistency to keep buffer.");
+    if (attendancePercent < 65) insights.push("Attendance looks low; this might increase risk unless near-term class consistency improves.");
+    else if (attendancePercent < 75) insights.push("Attendance is below 75%, which might make near-term misses more costly.");
+    else insights.push("Attendance appears in a safer zone; continuing this pattern could preserve buffer.");
   }
 
   if (typeof cgpa === "number") {
-    if (cgpa >= 8.5) insights.push("CGPA is strong. Keep focusing on weak components to sustain the trend.");
-    else if (cgpa >= 7.5) insights.push("CGPA is moderate. A few component improvements can move you up.");
-    else insights.push("CGPA needs attention. Target one subject at a time and improve internals.");
+    if (cgpa >= 8.5) insights.push("CGPA trend looks strong; focusing on weak components might help sustain it.");
+    else if (cgpa >= 7.5) insights.push("CGPA appears moderate; a few component-level gains might move it up.");
+    else insights.push("CGPA appears under pressure; improving one subject at a time might help stabilize.");
   }
 
   return insights.slice(0, 3);
@@ -253,7 +360,28 @@ async function getAcademicHistory(userId, range) {
     attendancePercentage: r.att_pct === null || r.att_pct === undefined ? null : Number(r.att_pct)
   }));
 
+  let performanceRows = [];
+  try {
+    performanceRows = await marksModel.getPerformanceByUser(userId);
+  } catch (_error) {
+    performanceRows = [];
+  }
+  const bySubjectId = new Map((performanceRows || []).map((row) => [String(row.subject_id), row]));
+  const subjectsWithStanding = subjects.map((row) => {
+    const standing = bySubjectId.get(String(row.subjectId));
+    return {
+      ...row,
+      sectionRank: standing?.section_rank === undefined || standing?.section_rank === null ? null : Number(standing.section_rank),
+      classSize: standing?.class_size === undefined || standing?.class_size === null ? null : Number(standing.class_size),
+      topPercent: standing?.top_percent === undefined || standing?.top_percent === null ? null : Number(standing.top_percent)
+    };
+  });
+
   const insights = computeInsightsAcademic({ attendancePercent, cgpa });
+  const standing = await getDomainStanding(userId, "academic_score_index");
+  if (standing.topPercent !== null) {
+    insights.unshift(`Academic standing might currently be around ${standing.band} in your cohort.`);
+  }
 
   return {
     range: selected,
@@ -265,7 +393,8 @@ async function getAcademicHistory(userId, range) {
     gpaTrend,
     attendanceByMonth,
     creditDistribution,
-    subjects,
+    subjects: subjectsWithStanding,
+    standing,
     insights
   };
 }
@@ -273,13 +402,13 @@ async function getAcademicHistory(userId, range) {
 function computeInsightsFitness({ completionRate, stepsTotal }) {
   const insights = [];
   if (typeof completionRate === "number") {
-    if (completionRate >= 80) insights.push("Workout adherence is strong this period. Keep the streak.");
-    else if (completionRate >= 50) insights.push("Workout adherence is moderate. Try protecting your workout time window.");
-    else insights.push("Workout adherence is low. Start with shorter sessions and build consistency.");
+    if (completionRate >= 80) insights.push("Workout adherence looks strong this period; the current schedule might be working well.");
+    else if (completionRate >= 50) insights.push("Workout adherence appears moderate; protecting one workout slot might improve it.");
+    else insights.push("Workout adherence appears low; shorter sessions might help rebuild consistency.");
   }
   if (typeof stepsTotal === "number") {
-    if (stepsTotal >= 70000) insights.push("Great weekly movement volume. Recovery and sleep matter.");
-    else if (stepsTotal >= 35000) insights.push("Movement is decent. Add a short walk on low-activity days.");
+    if (stepsTotal >= 70000) insights.push("Movement volume looks high; recovery and sleep quality might now be the key constraint.");
+    else if (stepsTotal >= 35000) insights.push("Movement looks decent; a short walk on low-activity days might help.");
   }
   return insights.slice(0, 3);
 }
@@ -341,6 +470,37 @@ async function getFitnessHistory(userId, range) {
   const activityBreakdown = (activityRows || []).map((r) => ({ type: r.activity_type, count: Number(r.count || 0) }));
 
   const insights = computeInsightsFitness({ completionRate, stepsTotal });
+  const [dailyActionRows] = await pool.execute(
+    `SELECT
+      DATE(performed_at) AS day_key,
+      COUNT(*) AS total_actions,
+      SUM(CASE WHEN LOWER(status) IN ('done', 'completed') THEN 1 ELSE 0 END) AS completed_actions
+     FROM workout_action
+     WHERE user_id = ? AND performed_at >= ?
+     GROUP BY day_key
+     ORDER BY day_key ASC`,
+    [userId, `${sinceDate} 00:00:00`]
+  );
+
+  const orderedDays = (dailyActionRows || []).map((r) => ({
+    total: Number(r.total_actions || 0),
+    done: Number(r.completed_actions || 0)
+  }));
+  const splitIdx = Math.floor(orderedDays.length / 2);
+  const previousDays = orderedDays.slice(0, splitIdx);
+  const currentDays = orderedDays.slice(splitIdx);
+
+  const previousRate =
+    previousDays.length === 0
+      ? null
+      : (previousDays.reduce((s, d) => s + d.done, 0) / Math.max(1, previousDays.reduce((s, d) => s + d.total, 0))) * 100;
+  const currentRate =
+    currentDays.length === 0
+      ? null
+      : (currentDays.reduce((s, d) => s + d.done, 0) / Math.max(1, currentDays.reduce((s, d) => s + d.total, 0))) * 100;
+
+  const selfTrend = buildTrend("Workout completion", currentRate, previousRate, " pp", true);
+  insights.unshift(selfTrend.summary);
 
   return {
     range: selected,
@@ -353,6 +513,7 @@ async function getFitnessHistory(userId, range) {
     },
     fitSeries,
     activityBreakdown,
+    selfTrend,
     insights
   };
 }
@@ -360,14 +521,14 @@ async function getFitnessHistory(userId, range) {
 function computeInsightsNutrition({ avgCalories, proteinTotal, days }) {
   const insights = [];
   if (typeof avgCalories === "number") {
-    if (avgCalories >= 2200) insights.push("Average calories are high this period. Watch late snacks and portions.");
-    else if (avgCalories > 0 && avgCalories < 1400) insights.push("Average calories are low. Ensure you're not under-fueling.");
+    if (avgCalories >= 2200) insights.push("Average calories look high this period; portions or late snacks might be contributing.");
+    else if (avgCalories > 0 && avgCalories < 1400) insights.push("Average calories look low; under-fueling might affect energy.");
   }
   if (typeof proteinTotal === "number" && typeof days === "number" && days > 0) {
     const avgProtein = proteinTotal / days;
-    if (avgProtein >= 90) insights.push("Protein intake is strong. Keep consistency across days.");
-    else if (avgProtein >= 50) insights.push("Protein is moderate. Add a protein source in one meal.");
-    else insights.push("Protein is low. Add eggs, paneer, dal, chicken, or whey.");
+    if (avgProtein >= 90) insights.push("Protein intake looks strong; maintaining day-to-day consistency might preserve this.");
+    else if (avgProtein >= 50) insights.push("Protein appears moderate; adding one protein-focused meal might help.");
+    else insights.push("Protein appears low; adding eggs, paneer, dal, chicken, or whey might help.");
   }
   return insights.slice(0, 3);
 }
@@ -428,6 +589,16 @@ async function getNutritionHistory(userId, range) {
   const overLimitDays = series.filter((d) => d.calories > 2000).length;
 
   const insights = computeInsightsNutrition({ avgCalories, proteinTotal: totalProtein, days });
+  const dailyBalanceScores = series.map((d) => {
+    const caloriesBalanced = d.calories >= 1400 && d.calories <= 2200 ? 1 : 0;
+    const proteinBalanced = d.protein >= 70 ? 1 : 0;
+    return ((caloriesBalanced + proteinBalanced) / 2) * 100;
+  });
+  const splitIdx = Math.floor(dailyBalanceScores.length / 2);
+  const previousScore = average(dailyBalanceScores.slice(0, splitIdx));
+  const currentScore = average(dailyBalanceScores.slice(splitIdx));
+  const selfTrend = buildTrend("Nutrition balance", currentScore, previousScore, " pts", true);
+  insights.unshift(selfTrend.summary);
 
   return {
     range: selected,
@@ -443,6 +614,7 @@ async function getNutritionHistory(userId, range) {
       carbs: Number(totalCarbs.toFixed(2)),
       fats: Number(totalFats.toFixed(2))
     },
+    selfTrend,
     insights
   };
 }

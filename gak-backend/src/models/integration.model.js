@@ -1,18 +1,30 @@
 const pool = require("../config/db");
 
-async function saveGoogleTokens(userId, { googleId, accessToken, refreshToken, tokenExpiry }) {
-  await pool.execute(
-    `UPDATE app_user
-     SET google_id = COALESCE(?, google_id),
-         google_access_token = ?,
-         google_refresh_token = COALESCE(?, google_refresh_token),
-         google_token_expiry = COALESCE(?, google_token_expiry)
-     WHERE user_id = ?`,
-    [googleId || null, accessToken || null, refreshToken || null, tokenExpiry || null, userId]
-  );
+function isMissingGoogleAccountTable(error) {
+  return String(error?.code || "") === "ER_NO_SUCH_TABLE";
 }
 
-async function getUserGoogleTokens(userId) {
+function toLegacyGoogleAccountRow(row) {
+  if (!row || !row.google_access_token) {
+    return null;
+  }
+
+  return {
+    account_id: `legacy-${row.user_id}`,
+    user_id: row.user_id,
+    google_id: row.google_id || null,
+    google_email: null,
+    google_name: null,
+    google_access_token: row.google_access_token,
+    google_refresh_token: row.google_refresh_token || null,
+    google_token_expiry: row.google_token_expiry || null,
+    is_primary: 1,
+    created_at: row.created_at || null,
+    updated_at: row.updated_at || null
+  };
+}
+
+async function getLegacyGoogleTokens(userId) {
   const [rows] = await pool.execute(
     `SELECT user_id, google_id, google_access_token, google_refresh_token, google_token_expiry
      FROM app_user
@@ -20,17 +32,450 @@ async function getUserGoogleTokens(userId) {
     [userId]
   );
 
+  return toLegacyGoogleAccountRow(rows[0] || null);
+}
+
+async function mirrorPrimaryGoogleAccountToLegacy(connection, userId, accountRow) {
+  if (!accountRow) {
+    await connection.execute(
+      `UPDATE app_user
+       SET google_id = NULL,
+           google_access_token = NULL,
+           google_refresh_token = NULL,
+           google_token_expiry = NULL
+       WHERE user_id = ?`,
+      [userId]
+    );
+    return;
+  }
+
+  await connection.execute(
+    `UPDATE app_user
+     SET google_id = ?,
+         google_access_token = ?,
+         google_refresh_token = ?,
+         google_token_expiry = ?
+     WHERE user_id = ?`,
+    [
+      accountRow.google_id || null,
+      accountRow.google_access_token || null,
+      accountRow.google_refresh_token || null,
+      accountRow.google_token_expiry || null,
+      userId
+    ]
+  );
+}
+
+async function listUserGoogleAccountsWithTokens(userId) {
+  try {
+    const [rows] = await pool.execute(
+      `SELECT account_id, user_id, google_id, google_email, google_name,
+              google_access_token, google_refresh_token, google_token_expiry, is_primary,
+              created_at, updated_at
+       FROM google_account
+       WHERE user_id = ?
+       ORDER BY is_primary DESC, updated_at DESC, created_at DESC`,
+      [userId]
+    );
+
+    if (rows.length > 0) {
+      return rows;
+    }
+  } catch (error) {
+    if (!isMissingGoogleAccountTable(error)) {
+      throw error;
+    }
+  }
+
+  const legacy = await getLegacyGoogleTokens(userId);
+  return legacy ? [legacy] : [];
+}
+
+async function listUserGoogleAccounts(userId) {
+  const rows = await listUserGoogleAccountsWithTokens(userId);
+  return rows.map((row) => ({
+    account_id: row.account_id,
+    user_id: row.user_id,
+    google_id: row.google_id,
+    google_email: row.google_email,
+    google_name: row.google_name,
+    google_token_expiry: row.google_token_expiry,
+    is_primary: Number(row.is_primary || 0) === 1,
+    created_at: row.created_at || null,
+    updated_at: row.updated_at || null
+  }));
+}
+
+async function getGoogleAccountById(userId, accountId) {
+  if (!accountId) {
+    return null;
+  }
+
+  try {
+    const [rows] = await pool.execute(
+      `SELECT account_id, user_id, google_id, google_email, google_name,
+              google_access_token, google_refresh_token, google_token_expiry, is_primary,
+              created_at, updated_at
+       FROM google_account
+       WHERE user_id = ? AND account_id = ?
+       LIMIT 1`,
+      [userId, accountId]
+    );
+    return rows[0] || null;
+  } catch (error) {
+    if (!isMissingGoogleAccountTable(error)) {
+      throw error;
+    }
+    return null;
+  }
+}
+
+async function getPrimaryGoogleAccountTokens(userId) {
+  const rows = await listUserGoogleAccountsWithTokens(userId);
   return rows[0] || null;
 }
 
-async function listUsersWithRefreshToken() {
+async function getFitGoogleAccountId(userId) {
   const [rows] = await pool.execute(
-    `SELECT user_id, google_access_token, google_refresh_token
+    `SELECT fit_google_account_id
+     FROM app_user
+     WHERE user_id = ?
+     LIMIT 1`,
+    [userId]
+  );
+  return rows[0]?.fit_google_account_id || null;
+}
+
+async function setFitGoogleAccountSelectionOnce(userId, accountId) {
+  const [result] = await pool.execute(
+    `UPDATE app_user
+     SET fit_google_account_id = ?
+     WHERE user_id = ?
+       AND fit_google_account_id IS NULL`,
+    [accountId, userId]
+  );
+  return Number(result.affectedRows || 0) === 1;
+}
+
+async function clearFitGoogleAccountSelection(userId) {
+  await pool.execute(
+    `UPDATE app_user
+     SET fit_google_account_id = NULL
+     WHERE user_id = ?`,
+    [userId]
+  );
+}
+
+async function saveGoogleTokens(userId, {
+  googleId,
+  googleEmail = null,
+  googleName = null,
+  accessToken,
+  refreshToken,
+  tokenExpiry,
+  setPrimary = true
+}) {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    if (!googleId) {
+      await connection.execute(
+        `UPDATE app_user
+         SET google_access_token = ?,
+             google_refresh_token = COALESCE(?, google_refresh_token),
+             google_token_expiry = COALESCE(?, google_token_expiry)
+         WHERE user_id = ?`,
+        [accessToken || null, refreshToken || null, tokenExpiry || null, userId]
+      );
+      await connection.commit();
+      return;
+    }
+
+    try {
+      if (setPrimary) {
+        await connection.execute(`UPDATE google_account SET is_primary = FALSE WHERE user_id = ?`, [userId]);
+      }
+
+      await connection.execute(
+        `INSERT INTO google_account
+          (account_id, user_id, google_id, google_email, google_name,
+           google_access_token, google_refresh_token, google_token_expiry, is_primary)
+         VALUES (UUID(), ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           google_email = VALUES(google_email),
+           google_name = VALUES(google_name),
+           google_access_token = VALUES(google_access_token),
+           google_refresh_token = COALESCE(VALUES(google_refresh_token), google_refresh_token),
+           google_token_expiry = COALESCE(VALUES(google_token_expiry), google_token_expiry),
+           is_primary = IF(VALUES(is_primary), TRUE, is_primary),
+           updated_at = CURRENT_TIMESTAMP`,
+        [
+          userId,
+          googleId || "",
+          googleEmail || null,
+          googleName || null,
+          accessToken || null,
+          refreshToken || null,
+          tokenExpiry || null,
+          setPrimary ? 1 : 0
+        ]
+      );
+
+      const [accountRows] = await connection.execute(
+        `SELECT account_id, user_id, google_id, google_email, google_name,
+                google_access_token, google_refresh_token, google_token_expiry, is_primary,
+                created_at, updated_at
+         FROM google_account
+         WHERE user_id = ? AND google_id = ?
+         LIMIT 1`,
+        [userId, googleId || ""]
+      );
+      const account = accountRows[0] || null;
+
+      if (setPrimary || !account?.is_primary) {
+        const [primaryRows] = await connection.execute(
+          `SELECT account_id, user_id, google_id, google_email, google_name,
+                  google_access_token, google_refresh_token, google_token_expiry, is_primary
+           FROM google_account
+           WHERE user_id = ?
+           ORDER BY is_primary DESC, updated_at DESC, created_at DESC
+           LIMIT 1`,
+          [userId]
+        );
+        await mirrorPrimaryGoogleAccountToLegacy(connection, userId, primaryRows[0] || null);
+      }
+
+      await connection.commit();
+    } catch (error) {
+      if (!isMissingGoogleAccountTable(error)) {
+        throw error;
+      }
+
+      await connection.execute(
+        `UPDATE app_user
+         SET google_id = COALESCE(?, google_id),
+             google_access_token = ?,
+             google_refresh_token = COALESCE(?, google_refresh_token),
+             google_token_expiry = COALESCE(?, google_token_expiry)
+         WHERE user_id = ?`,
+        [googleId || null, accessToken || null, refreshToken || null, tokenExpiry || null, userId]
+      );
+      await connection.commit();
+    }
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function setPrimaryGoogleAccount(userId, accountId) {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [existingRows] = await connection.execute(
+      `SELECT account_id
+       FROM google_account
+       WHERE user_id = ? AND account_id = ?
+       LIMIT 1`,
+      [userId, accountId]
+    );
+    if (!existingRows[0]) {
+      await connection.rollback();
+      return false;
+    }
+
+    const [result] = await connection.execute(
+      `UPDATE google_account
+       SET is_primary = (account_id = ?)
+       WHERE user_id = ?`,
+      [accountId, userId]
+    );
+
+    if (Number(result.affectedRows || 0) === 0) {
+      await connection.rollback();
+      return false;
+    }
+
+    const [rows] = await connection.execute(
+      `SELECT account_id, user_id, google_id, google_email, google_name,
+              google_access_token, google_refresh_token, google_token_expiry, is_primary
+       FROM google_account
+       WHERE user_id = ?
+       ORDER BY is_primary DESC, updated_at DESC, created_at DESC
+       LIMIT 1`,
+      [userId]
+    );
+    await mirrorPrimaryGoogleAccountToLegacy(connection, userId, rows[0] || null);
+
+    await connection.commit();
+    return Number(result.changedRows || 0) > 0 || Number(result.affectedRows || 0) > 0;
+  } catch (error) {
+    await connection.rollback();
+    if (isMissingGoogleAccountTable(error)) {
+      return false;
+    }
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function removeGoogleAccount(userId, accountId) {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [result] = await connection.execute(
+      `DELETE FROM google_account
+       WHERE user_id = ? AND account_id = ?`,
+      [userId, accountId]
+    );
+    if (Number(result.affectedRows || 0) === 0) {
+      await connection.rollback();
+      return false;
+    }
+
+    const [rows] = await connection.execute(
+      `SELECT account_id, user_id, google_id, google_email, google_name,
+              google_access_token, google_refresh_token, google_token_expiry, is_primary
+       FROM google_account
+       WHERE user_id = ?
+       ORDER BY is_primary DESC, updated_at DESC, created_at DESC`,
+      [userId]
+    );
+
+    if (rows.length > 0 && !rows.some((row) => Number(row.is_primary || 0) === 1)) {
+      await connection.execute(
+        `UPDATE google_account
+         SET is_primary = (account_id = ?)
+         WHERE user_id = ?`,
+        [rows[0].account_id, userId]
+      );
+      rows[0].is_primary = 1;
+    }
+
+    await mirrorPrimaryGoogleAccountToLegacy(connection, userId, rows[0] || null);
+    await connection.commit();
+    return true;
+  } catch (error) {
+    await connection.rollback();
+    if (isMissingGoogleAccountTable(error)) {
+      return false;
+    }
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function listGoogleAccountsWithRefreshToken() {
+  try {
+    const [rows] = await pool.execute(
+      `SELECT account_id, user_id, google_id, google_email, google_name,
+              google_access_token, google_refresh_token, google_token_expiry, is_primary
+       FROM google_account
+       WHERE google_refresh_token IS NOT NULL
+       ORDER BY updated_at DESC`
+    );
+
+    if (rows.length > 0) {
+      return rows;
+    }
+  } catch (error) {
+    if (!isMissingGoogleAccountTable(error)) {
+      throw error;
+    }
+  }
+
+  const [legacyRows] = await pool.execute(
+    `SELECT user_id, google_id, google_access_token, google_refresh_token, google_token_expiry
      FROM app_user
      WHERE google_refresh_token IS NOT NULL`
   );
+  return legacyRows.map((row) => toLegacyGoogleAccountRow(row)).filter(Boolean);
+}
 
-  return rows;
+async function listUsersWithRefreshToken() {
+  const accounts = await listGoogleAccountsWithRefreshToken();
+  const uniqueUsers = new Map();
+  for (const row of accounts) {
+    if (!uniqueUsers.has(row.user_id)) {
+      uniqueUsers.set(row.user_id, {
+        user_id: row.user_id,
+        google_access_token: row.google_access_token || null,
+        google_refresh_token: row.google_refresh_token || null
+      });
+    }
+  }
+  return [...uniqueUsers.values()];
+}
+
+async function clearGoogleTokens(userId) {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    try {
+      await connection.execute(`DELETE FROM google_account WHERE user_id = ?`, [userId]);
+    } catch (error) {
+      if (!isMissingGoogleAccountTable(error)) {
+        throw error;
+      }
+    }
+    await connection.execute(
+      `UPDATE app_user
+       SET google_id = NULL,
+           google_access_token = NULL,
+           google_refresh_token = NULL,
+           google_token_expiry = NULL,
+           fit_google_account_id = NULL
+       WHERE user_id = ?`,
+      [userId]
+    );
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function getUserGoogleTokens(userId) {
+  return getPrimaryGoogleAccountTokens(userId);
+}
+
+async function saveOAuthStateNonce({ nonce, userId, expiresAt }) {
+  await pool.execute(
+    `INSERT INTO oauth_state_nonce (nonce, user_id, expires_at)
+     VALUES (?, ?, ?)`,
+    [nonce, userId, expiresAt]
+  );
+}
+
+async function consumeOAuthStateNonce({ nonce, userId }) {
+  const [result] = await pool.execute(
+    `UPDATE oauth_state_nonce
+     SET used_at = CURRENT_TIMESTAMP
+     WHERE nonce = ?
+       AND user_id = ?
+       AND used_at IS NULL
+       AND expires_at >= CURRENT_TIMESTAMP`,
+    [nonce, userId]
+  );
+  return Number(result.affectedRows || 0) === 1;
+}
+
+async function purgeOAuthStateNonces() {
+  const [result] = await pool.execute(
+    `DELETE FROM oauth_state_nonce
+     WHERE (used_at IS NOT NULL AND used_at < (CURRENT_TIMESTAMP - INTERVAL 1 DAY))
+        OR expires_at < (CURRENT_TIMESTAMP - INTERVAL 1 DAY)`
+  );
+  return Number(result.affectedRows || 0);
 }
 
 async function createCalendarEventRecord({ eventId, userId, eventDate, eventType, title, googleEventId = null, syncStatus = "pending" }) {
@@ -63,13 +508,16 @@ async function listPendingCalendarEvents() {
   return rows;
 }
 
-async function getWorkoutSessionById(sessionId) {
-  const [rows] = await pool.execute(
-    `SELECT session_id, user_id, workout_date, workout_type, muscle_group, calories_burned, duration_minutes
-     FROM workout_session
-     WHERE session_id = ?`,
-    [sessionId]
-  );
+async function getWorkoutSessionById(sessionId, userId = null) {
+  const sql = userId
+    ? `SELECT session_id, user_id, workout_date, workout_type, muscle_group, calories_burned, duration_minutes
+       FROM workout_session
+       WHERE session_id = ? AND user_id = ?`
+    : `SELECT session_id, user_id, workout_date, workout_type, muscle_group, calories_burned, duration_minutes
+       FROM workout_session
+       WHERE session_id = ?`;
+  const params = userId ? [sessionId, userId] : [sessionId];
+  const [rows] = await pool.execute(sql, params);
 
   return rows[0] || null;
 }
@@ -83,11 +531,24 @@ async function updateWorkoutGoogleSync(sessionId, { googleFitSessionId, syncStat
   );
 }
 
-async function createEmailEvent({ id, userId, subject, parsedDeadline, confidenceScore }) {
+async function createEmailEvent({
+  id,
+  userId,
+  subject,
+  parsedDeadline,
+  confidenceScore,
+  sourceMessageId = null,
+  sourceAccountEmail = null
+}) {
   await pool.execute(
-    `INSERT INTO email_event (id, user_id, subject, parsed_deadline, source, confidence_score)
-     VALUES (?, ?, ?, ?, 'gmail', ?)`,
-    [id, userId, subject, parsedDeadline || null, confidenceScore]
+    `INSERT INTO email_event
+      (id, user_id, subject, parsed_deadline, source, source_message_id, source_account_email, confidence_score)
+     VALUES (?, ?, ?, ?, 'gmail', ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+      subject = VALUES(subject),
+      parsed_deadline = VALUES(parsed_deadline),
+      confidence_score = VALUES(confidence_score)`,
+    [id, userId, subject, parsedDeadline || null, sourceMessageId || null, sourceAccountEmail || null, confidenceScore]
   );
 }
 
@@ -240,7 +701,21 @@ async function listAcademiaAttendanceRows(userId) {
 module.exports = {
   saveGoogleTokens,
   getUserGoogleTokens,
+  getFitGoogleAccountId,
+  setFitGoogleAccountSelectionOnce,
+  clearFitGoogleAccountSelection,
+  listUserGoogleAccounts,
+  listUserGoogleAccountsWithTokens,
+  getGoogleAccountById,
+  getPrimaryGoogleAccountTokens,
+  setPrimaryGoogleAccount,
+  removeGoogleAccount,
+  listGoogleAccountsWithRefreshToken,
   listUsersWithRefreshToken,
+  clearGoogleTokens,
+  saveOAuthStateNonce,
+  consumeOAuthStateNonce,
+  purgeOAuthStateNonces,
   createCalendarEventRecord,
   updateCalendarEventSync,
   listPendingCalendarEvents,

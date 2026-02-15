@@ -1,8 +1,8 @@
 const { randomUUID } = require("crypto");
 const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
 
 const userModel = require("../models/user.model");
+const { signAuthToken } = require("../utils/jwt.util");
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -81,9 +81,7 @@ async function login(req, res, next) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    const token = jwt.sign({ userId: user.user_id, email: user.email }, process.env.JWT_SECRET, {
-      expiresIn: "1d"
-    });
+    const token = signAuthToken({ userId: user.user_id, email: user.email });
 
     return res.status(200).json({
       token,
@@ -113,8 +111,45 @@ async function getProfile(req, res, next) {
   }
 }
 
+async function exportMyData(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const payload = await userModel.exportUserData(userId);
+    return res.status(200).json(payload);
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function deleteMyAccount(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const password = String(req.body?.password || "");
+    if (!password) {
+      return res.status(400).json({ message: "password is required to delete account" });
+    }
+
+    const authRow = await userModel.findAuthById(userId);
+    if (!authRow || !authRow.password_hash) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const valid = await bcrypt.compare(password, authRow.password_hash);
+    if (!valid) {
+      return res.status(401).json({ message: "Invalid password" });
+    }
+
+    await userModel.deleteUserData(userId);
+    return res.status(200).json({ deleted: true });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 module.exports = {
   register,
   login,
-  getProfile
+  getProfile,
+  exportMyData,
+  deleteMyAccount
 };

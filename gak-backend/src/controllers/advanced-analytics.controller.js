@@ -3,7 +3,8 @@ const behaviorService = require("../services/behavior.service");
 
 async function getBehaviorSummary(req, res, next) {
   try {
-    const summary = await recommendationService.getBehaviorSummary(req.user.userId);
+    const range = req.query?.range || "all";
+    const summary = await recommendationService.getBehaviorSummary(req.user.userId, range);
     return res.status(200).json(summary);
   } catch (error) {
     return next(error);

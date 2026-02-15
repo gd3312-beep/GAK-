@@ -4,6 +4,7 @@ const nutritionController = require("../controllers/nutrition.controller");
 
 const router = express.Router();
 
+router.post("/food/analyze", nutritionController.analyzeFoodImage);
 router.post("/food/image", nutritionController.uploadFoodImage);
 router.post("/food/confirm", nutritionController.confirmFood);
 router.post("/food/log", nutritionController.logManualMeal);

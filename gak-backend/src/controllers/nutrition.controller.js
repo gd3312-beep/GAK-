@@ -13,6 +13,60 @@ function ensureSelf(req, res, paramName = "userId") {
   return true;
 }
 
+function isIsoDate(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
+}
+
+function buildDummyFoodAnalysis(seedText) {
+  const presets = [
+    [
+      { name: "Paneer Bhurji", quantity: 1, unit: "serving", calories: 290, protein: 18, carbs: 8, fats: 20 },
+      { name: "Phulka", quantity: 2, unit: "piece", calories: 220, protein: 6, carbs: 42, fats: 2 }
+    ],
+    [
+      { name: "Rice", quantity: 1, unit: "cup", calories: 205, protein: 4, carbs: 45, fats: 0.4 },
+      { name: "Dal", quantity: 1, unit: "bowl", calories: 190, protein: 11, carbs: 24, fats: 6 }
+    ],
+    [
+      { name: "Grilled Chicken", quantity: 1, unit: "plate", calories: 320, protein: 40, carbs: 3, fats: 16 },
+      { name: "Salad", quantity: 1, unit: "bowl", calories: 95, protein: 3, carbs: 14, fats: 3 }
+    ]
+  ];
+
+  const seed = String(seedText || "default");
+  const idx = seed
+    .split("")
+    .reduce((sum, ch) => sum + ch.charCodeAt(0), 0) % presets.length;
+  const rows = presets[idx];
+
+  return rows.map((item, index) => ({
+    id: `dummy-${index + 1}`,
+    confidence: 0.86 - index * 0.05,
+    ...item
+  }));
+}
+
+async function analyzeFoodImage(req, res, next) {
+  try {
+    const imageDataUrl = String(req.body?.imageDataUrl || "");
+    const fileName = String(req.body?.fileName || "food-image");
+
+    if (!imageDataUrl.startsWith("data:image/")) {
+      return res.status(400).json({ message: "imageDataUrl (base64 data URL) is required" });
+    }
+
+    const detectedItems = buildDummyFoodAnalysis(`${req.user.userId}-${fileName}`);
+
+    return res.status(200).json({
+      mode: "dummy_future_scope",
+      notice: "Dummy nutrition analysis for future scope. Replace with OpenAI vision flow when OPENAI_API_KEY is enabled.",
+      detectedItems
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 async function uploadFoodImage(req, res, next) {
   try {
     const { imageUrl, foodName } = req.body;
@@ -88,7 +142,8 @@ async function getDailyNutrition(req, res, next) {
   try {
     const { userId } = req.params;
     if (!ensureSelf(req, res, "userId")) return;
-    const date = req.query.date || new Date().toISOString().slice(0, 10);
+    const reqDate = req.query.date || new Date().toISOString().slice(0, 10);
+    const date = isIsoDate(reqDate) ? reqDate : new Date().toISOString().slice(0, 10);
 
     const summary = await analyticsService.getDailyNutritionSummary(userId, date);
     return res.status(200).json(summary);
@@ -108,7 +163,8 @@ async function getDailyMeals(req, res, next) {
   try {
     const { userId } = req.params;
     if (!ensureSelf(req, res, "userId")) return;
-    const date = req.query.date || new Date().toISOString().slice(0, 10);
+    const reqDate = req.query.date || new Date().toISOString().slice(0, 10);
+    const date = isIsoDate(reqDate) ? reqDate : new Date().toISOString().slice(0, 10);
 
     const rows = await foodModel.listMealImagesByUserAndDate(userId, date);
 
@@ -161,7 +217,7 @@ async function logManualMeal(req, res, next) {
       return res.status(400).json({ message: "items[] is required" });
     }
 
-    const logDate = date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : null;
+    const logDate = isIsoDate(date) ? date : null;
     const uploadedAt = logDate ? `${logDate} 12:00:00` : null;
 
     const imageId = randomUUID();
@@ -222,6 +278,7 @@ async function logManualMeal(req, res, next) {
 }
 
 module.exports = {
+  analyzeFoodImage,
   uploadFoodImage,
   confirmFood,
   getDailyNutrition,

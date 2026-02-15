@@ -3,27 +3,42 @@
 ## 1) Start MySQL server
 - macOS (Homebrew): `brew services start mysql`
 
-## 2) Apply schema and constraints
+## 2) Apply all SQL files (`01`..`09` + `views.sql`)
 ```bash
+cd gak-backend
+npm run db:bootstrap
+```
+By default, this resets `GAK` first (`DB_RESET=true`) for clean reproducibility.
+
+Manual equivalent:
+```bash
+mysql -uroot -proot -e "DROP DATABASE IF EXISTS GAK;"
 mysql -uroot -proot < sql/01_schema.sql
 mysql -uroot -proot < sql/02_constraints.sql
 mysql -uroot -proot < sql/05_advanced_features.sql
-```
-
-## 3) Apply views and seed sample data
-```bash
+mysql -uroot -proot < sql/07_academia_integration.sql
+mysql -uroot -proot < sql/08_fit_daily_metric.sql
+mysql -uroot -proot < sql/09_workout_plan_details.sql
 mysql -uroot -proot < sql/views.sql
 mysql -uroot -proot < sql/03_sample_data.sql
 mysql -uroot -proot < sql/06_advanced_sample_data.sql
+mysql -uroot -proot < sql/04_run_demo_queries.sql
 ```
 
-## 4) Run demo queries
+## 3) Run demo queries
 ```bash
 mysql -uroot -proot < sql/04_run_demo_queries.sql
 ```
 
-## 5) Start backend
+## 4) Start backend
 ```bash
+npm install
+npm run dev
+```
+
+## 5) Start frontend
+```bash
+cd ../Frontend
 npm install
 npm run dev
 ```
@@ -45,3 +60,10 @@ npm run dev
 - `SELECT * FROM Student_Performance_View WHERE user_id='USER001';`
 - `SELECT * FROM Daily_Nutrition_View WHERE user_id='USER001';`
 - Screenshots of output for report appendix.
+
+## 8) Backup and restore (MySQL)
+```bash
+cd gak-backend
+npm run db:backup -- ./backups
+npm run db:restore -- ./backups/<file>.sql
+```

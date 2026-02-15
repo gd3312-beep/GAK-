@@ -5,7 +5,10 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "db:bootstrap": "bash scripts/bootstrap_db.sh",
+    "db:backup": "bash scripts/mysql_backup.sh",
+    "db:restore": "bash scripts/mysql_restore.sh"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

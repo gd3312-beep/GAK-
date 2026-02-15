@@ -1,4 +1,4 @@
-const jwt = require("jsonwebtoken");
+const { verifyAuthToken } = require("../utils/jwt.util");
 
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -10,7 +10,7 @@ function authMiddleware(req, res, next) {
   const token = authHeader.split(" ")[1];
 
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    const payload = verifyAuthToken(token);
     req.user = payload;
     return next();
   } catch (_error) {

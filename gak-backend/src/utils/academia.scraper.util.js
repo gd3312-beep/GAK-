@@ -8,6 +8,50 @@ try {
   playwright = null;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function shouldRetryScrape(error) {
+  const text = String(error?.message || "").toLowerCase();
+  return (
+    text.includes("timeout")
+    || text.includes("navigation")
+    || text.includes("net::")
+    || text.includes("econn")
+    || text.includes("503")
+    || text.includes("502")
+    || text.includes("temporar")
+  );
+}
+
+function isFatalScrapeError(error) {
+  const text = String(error?.message || "").toLowerCase();
+  return (
+    text.includes("invalid college credentials")
+    || text.includes("check college email/password")
+    || text.includes("captcha")
+  );
+}
+
+async function withRetry(task, { attempts, backoffMs }) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await task(attempt);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts || !shouldRetryScrape(error)) {
+        throw error;
+      }
+      await sleep(backoffMs * attempt);
+    }
+  }
+
+  throw lastError;
+}
+
 function cleanText(value) {
   return String(value || "")
     .replace(/&nbsp;/gi, " ")
@@ -514,8 +558,37 @@ async function clickFirstVisible(page, selectors) {
   return false;
 }
 
+async function pageHasCaptchaChallenge(page) {
+  try {
+    const bodyText = String(await page.textContent("body")).toLowerCase();
+    return (
+      bodyText.includes("captcha")
+      || bodyText.includes("i am not a robot")
+      || bodyText.includes("verify you are human")
+      || bodyText.includes("recaptcha")
+      || bodyText.includes("hcaptcha")
+    );
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function pageHasInvalidCredentialMessage(page) {
+  try {
+    const bodyText = String(await page.textContent("body")).toLowerCase();
+    return (
+      bodyText.includes("invalid password")
+      || bodyText.includes("incorrect password")
+      || bodyText.includes("invalid credentials")
+      || bodyText.includes("wrong password")
+    );
+  } catch (_error) {
+    return false;
+  }
+}
+
 async function loginViaBrowser(page, { baseUrl, collegeEmail, collegePassword }) {
-  await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+  await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 90000 });
 
   // Zoho IAM sign-in typically prompts for email first, then password.
   const emailOk = await fillFirstVisible(
@@ -523,8 +596,14 @@ async function loginViaBrowser(page, { baseUrl, collegeEmail, collegePassword })
     ["#login_id", "input[name='login_id']", "input[type='email']", "input[name='LOGIN_ID']"],
     collegeEmail
   );
-  if (emailOk) {
-    await clickFirstVisible(page, ["#nextbtn", "button:has-text('Next')", "button:has-text('Continue')"]);
+  if (!emailOk) {
+    throw new Error("Academia login failed: unable to find email input on sign-in page");
+  }
+
+  await clickFirstVisible(page, ["#nextbtn", "button:has-text('Next')", "button:has-text('Continue')"]);
+
+  if (await pageHasCaptchaChallenge(page)) {
+    throw new Error("Academia login blocked by captcha challenge. Complete login manually once and retry sync.");
   }
 
   const passwordOk = await fillFirstVisible(
@@ -533,13 +612,25 @@ async function loginViaBrowser(page, { baseUrl, collegeEmail, collegePassword })
     collegePassword
   );
   if (!passwordOk) {
-    // Some sessions might redirect straight in; don't hard-fail here.
-    return;
+    if (await pageHasCaptchaChallenge(page)) {
+      throw new Error("Academia login blocked by captcha challenge. Complete login manually once and retry sync.");
+    }
+    throw new Error("Academia login failed: unable to find password input");
   }
 
   await clickFirstVisible(page, ["#nextbtn", "button:has-text('Sign in')", "button:has-text('Sign In')", "button:has-text('Login')"]);
 
   // Wait until we land back on the academia app or a hash-page URL.
+  await page.waitForTimeout(1500);
+
+  if (await pageHasCaptchaChallenge(page)) {
+    throw new Error("Academia login blocked by captcha challenge. Complete login manually once and retry sync.");
+  }
+
+  if (await pageHasInvalidCredentialMessage(page)) {
+    throw new Error("Academia login failed: invalid college credentials");
+  }
+
   await page.waitForURL(/academia\.srmist\.edu\.in/i, { timeout: 60000 }).catch(() => undefined);
 }
 
@@ -550,7 +641,7 @@ async function scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword 
 
   const baseUrl = process.env.ACADEMIA_BASE_URL || "https://academia.srmist.edu.in";
   const timetableUrl = process.env.ACADEMIA_TIMETABLE_URL || `${baseUrl}/#Page:My_Time_Table_2023_24`;
-  const marksUrl = process.env.ACADEMIA_MARKS_URL || `${baseUrl}/#Page:My_Attendance`;
+  const marksUrl = process.env.ACADEMIA_MARKS_URL || `${baseUrl}/#Page:My_Marks`;
   const attendanceUrl = process.env.ACADEMIA_ATTENDANCE_URL || `${baseUrl}/#Page:My_Attendance`;
 
   const browser = await playwright.chromium.launch({ headless: true });
@@ -568,9 +659,12 @@ async function scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword 
     });
 
     const gotoAndExtract = async (url) => {
-      await page.goto(url, { waitUntil: "networkidle" });
+      await page.goto(url, { waitUntil: "networkidle", timeout: 90000 });
       // Allow any SPA rendering to settle.
       await page.waitForTimeout(1500);
+      if (await pageHasCaptchaChallenge(page)) {
+        throw new Error("Academia scrape blocked by captcha challenge while loading page");
+      }
       return page.content();
     };
 
@@ -578,11 +672,17 @@ async function scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword 
     const marksHtml = await gotoAndExtract(marksUrl);
     const attendanceHtml = await gotoAndExtract(attendanceUrl);
 
-    return {
+    const result = {
       timetable: parseTimetableRows(timetableHtml),
       marks: parseMarksRows(marksHtml),
       attendance: parseAttendanceRows(attendanceHtml)
     };
+
+    if (!result.timetable.length && !result.marks.length && !result.attendance.length) {
+      throw new Error("Academia scrape returned no readable rows. Check scrape mode and page selectors.");
+    }
+
+    return result;
   } finally {
     await context.close().catch(() => undefined);
     await browser.close().catch(() => undefined);
@@ -591,16 +691,49 @@ async function scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword 
 
 async function scrapeAcademiaData({ collegeEmail, collegePassword }) {
   const mode = String(process.env.ACADEMIA_SCRAPE_MODE || "").toLowerCase();
+  const attempts = Math.max(1, Number(process.env.ACADEMIA_RETRY_ATTEMPTS || 3));
+  const backoffMs = Math.max(300, Number(process.env.ACADEMIA_RETRY_BACKOFF_MS || 1200));
   const usesHashPages =
     String(process.env.ACADEMIA_TIMETABLE_URL || "").includes("#Page:")
     || String(process.env.ACADEMIA_MARKS_URL || "").includes("#Page:")
     || String(process.env.ACADEMIA_ATTENDANCE_URL || "").includes("#Page:");
 
   if (mode === "playwright" || usesHashPages) {
-    return scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword });
+    try {
+      return await withRetry(
+        () => scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword }),
+        { attempts, backoffMs }
+      );
+    } catch (error) {
+      if (isFatalScrapeError(error)) {
+        const detail = String(error?.message || "unknown playwright error");
+        throw new Error(`Academia scraping failed after ${attempts} attempts (playwright): ${detail}`);
+      }
+
+      try {
+        return await withRetry(
+          () => scrapeAcademiaDataWithHttp({ collegeEmail, collegePassword }),
+          { attempts, backoffMs }
+        );
+      } catch (httpError) {
+        const playwrightDetail = String(error?.message || "unknown playwright error");
+        const httpDetail = String(httpError?.message || "unknown HTTP scrape error");
+        throw new Error(
+          `Academia scraping failed after ${attempts} attempts (playwright+http fallback): ${playwrightDetail}; fallback: ${httpDetail}`
+        );
+      }
+    }
   }
 
-  return scrapeAcademiaDataWithHttp({ collegeEmail, collegePassword });
+  try {
+    return await withRetry(
+      () => scrapeAcademiaDataWithHttp({ collegeEmail, collegePassword }),
+      { attempts, backoffMs }
+    );
+  } catch (error) {
+    const detail = String(error?.message || "unknown HTTP scrape error");
+    throw new Error(`Academia scraping failed after ${attempts} attempts (http): ${detail}`);
+  }
 }
 
 module.exports = {

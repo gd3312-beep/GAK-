@@ -24,6 +24,10 @@ function ensureSelf(req, res, paramName = "userId") {
   return true;
 }
 
+function isIsoDate(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
+}
+
 async function createWorkoutSession(req, res, next) {
   try {
     const { workoutDate, workoutType, muscleGroup, durationMinutes, caloriesBurned, planId } = req.body;
@@ -110,7 +114,8 @@ async function getFitnessSummary(req, res, next) {
 
 async function getFitDaily(req, res, next) {
   try {
-    const date = req.query.date || new Date().toISOString().slice(0, 10);
+    const requestDate = req.query.date || new Date().toISOString().slice(0, 10);
+    const date = isIsoDate(requestDate) ? requestDate : new Date().toISOString().slice(0, 10);
     const result = await integrationService.getFitDailyMetrics(req.user.userId, date);
     return res.status(200).json(result);
   } catch (error) {
@@ -121,7 +126,7 @@ async function getFitDaily(req, res, next) {
 async function getFitRange(req, res, next) {
   try {
     const from = req.query.from;
-    if (!from) {
+    if (!from || !isIsoDate(from)) {
       return res.status(400).json({ message: "from (YYYY-MM-DD) is required" });
     }
     const rows = await integrationService.listFitMetricsRange(req.user.userId, from);
@@ -149,6 +154,62 @@ function diffMinutes(startTime, endTime) {
   let end = eh * 60 + em;
   if (end < start) end += 24 * 60;
   return Math.max(1, end - start);
+}
+
+function dayLabelMatchesDate(label, dateObj) {
+  const raw = String(label || "").toLowerCase().trim();
+  if (!raw) {
+    return false;
+  }
+
+  const day = dateObj.getDay(); // 0=Sun, 1=Mon, ... 6=Sat
+  const mondayOrder = day === 0 ? 7 : day; // 1=Mon ... 7=Sun
+
+  const weekdayMatchers = [
+    { re: /\bmon(day)?\b/i, order: 1 },
+    { re: /\btue(s|sday)?\b/i, order: 2 },
+    { re: /\bwed(nesday)?\b/i, order: 3 },
+    { re: /\bthu(r|rs|rsday)?\b/i, order: 4 },
+    { re: /\bfri(day)?\b/i, order: 5 },
+    { re: /\bsat(urday)?\b/i, order: 6 },
+    { re: /\bsun(day)?\b/i, order: 7 }
+  ];
+
+  if (weekdayMatchers.some((matcher) => matcher.order === mondayOrder && matcher.re.test(raw))) {
+    return true;
+  }
+
+  const dayOrderMatch = raw.match(/\bday\s*([1-7])\b/i);
+  if (dayOrderMatch && Number(dayOrderMatch[1]) === mondayOrder) {
+    return true;
+  }
+
+  const standaloneNumber = raw.match(/\b([1-7])\b/);
+  if (standaloneNumber && Number(standaloneNumber[1]) === mondayOrder) {
+    return true;
+  }
+
+  return false;
+}
+
+function filterExercisesForDate(exercises, dateObj) {
+  const list = Array.isArray(exercises) ? exercises : [];
+  const hasDayLabels = list.some((item) => String(item?.day_label || "").trim().length > 0);
+
+  if (!hasDayLabels) {
+    return {
+      hasDayLabels: false,
+      isScheduledForDay: list.length > 0,
+      exercisesForDay: list
+    };
+  }
+
+  const exercisesForDay = list.filter((item) => dayLabelMatchesDate(item?.day_label, dateObj));
+  return {
+    hasDayLabels: true,
+    isScheduledForDay: exercisesForDay.length > 0,
+    exercisesForDay
+  };
 }
 
 async function uploadWorkoutPlan(req, res, next) {
@@ -266,10 +327,11 @@ async function getCurrentWorkoutPlan(req, res, next) {
 async function getTodayWorkoutPlan(req, res, next) {
   try {
     const date = String(req.query.date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    const dateObj = new Date(`${date}T00:00:00`);
 
     const plan = await workoutPlanModel.getLatestWorkoutPlan(req.user.userId);
     if (!plan) {
-      return res.status(200).json({ date, hasPlan: false, session: null, exercises: [] });
+      return res.status(200).json({ date, hasPlan: false, isScheduledForDay: false, session: null, exercises: [] });
     }
 
     let exercises = [];
@@ -283,6 +345,8 @@ async function getTodayWorkoutPlan(req, res, next) {
       }
     }
 
+    const schedule = filterExercisesForDate(exercises, dateObj);
+
     const session = await workoutModel.getSessionByUserAndDate(req.user.userId, date);
     const action = session ? await workoutModel.getActionForSession(req.user.userId, session.session_id) : null;
     const statusRaw = action?.status ? String(action.status).toLowerCase() : null;
@@ -291,13 +355,14 @@ async function getTodayWorkoutPlan(req, res, next) {
     return res.status(200).json({
       date,
       hasPlan: true,
+      isScheduledForDay: schedule.isScheduledForDay,
       plan: {
         planId: plan.plan_id,
         planName: plan.plan_name || null,
         startTime: plan.schedule_start_time ? String(plan.schedule_start_time) : null,
         endTime: plan.schedule_end_time ? String(plan.schedule_end_time) : null
       },
-      exercises,
+      exercises: schedule.exercisesForDay,
       session: session
         ? {
             sessionId: session.session_id,
@@ -313,7 +378,9 @@ async function getTodayWorkoutPlan(req, res, next) {
 
 async function setTodayWorkoutAction(req, res, next) {
   try {
-    const date = String(req.body.date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    const rawDate = String(req.body.date || new Date().toISOString().slice(0, 10)).slice(0, 10);
+    const date = isIsoDate(rawDate) ? rawDate : new Date().toISOString().slice(0, 10);
+    const dateObj = new Date(`${date}T00:00:00`);
     const status = String(req.body.status || "").toLowerCase();
 
     if (!["done", "completed", "skipped"].includes(status)) {
@@ -323,6 +390,22 @@ async function setTodayWorkoutAction(req, res, next) {
     const plan = await workoutPlanModel.getLatestWorkoutPlan(req.user.userId);
     if (!plan) {
       return res.status(400).json({ message: "No workout plan found. Upload a plan PDF first." });
+    }
+
+    let exercises = [];
+    try {
+      exercises = await workoutPlanModel.listPlanExercises(plan.plan_id);
+    } catch (dbError) {
+      if (dbError && dbError.code === "ER_NO_SUCH_TABLE") {
+        exercises = [];
+      } else {
+        throw dbError;
+      }
+    }
+
+    const schedule = filterExercisesForDate(exercises, dateObj);
+    if (!schedule.isScheduledForDay) {
+      return res.status(400).json({ message: "No workout is scheduled for this day." });
     }
 
     let session = await workoutModel.getSessionByUserAndDate(req.user.userId, date);

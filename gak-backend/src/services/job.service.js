@@ -8,12 +8,13 @@ async function runTokenRefreshJob() {
 }
 
 async function runGmailSyncJob() {
-  const users = await integrationModel.listUsersWithRefreshToken();
+  const accounts = await integrationModel.listGoogleAccountsWithRefreshToken();
+  const users = [...new Set(accounts.map((row) => row.user_id))];
   let processedUsers = 0;
   let totalEmails = 0;
 
-  for (const user of users) {
-    const result = await integrationService.parseGmailForAcademicEvents(user.user_id);
+  for (const userId of users) {
+    const result = await integrationService.parseGmailForAcademicEvents(userId);
     processedUsers += 1;
     totalEmails += Number(result.processed || 0);
   }
