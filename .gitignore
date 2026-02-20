@@ -1,3 +1,5 @@
 node_modules/
 .env
 .DS_Store
+gak-backend/tmp/
+gak-backend/uploads/workout-plans/

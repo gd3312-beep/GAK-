@@ -1,3 +1,4 @@
+const { randomUUID, createHash } = require("crypto");
 const pool = require("../config/db");
 
 function isMissingGoogleAccountTable(error) {
@@ -70,7 +71,7 @@ async function listUserGoogleAccountsWithTokens(userId) {
   try {
     const [rows] = await pool.execute(
       `SELECT account_id, user_id, google_id, google_email, google_name,
-              google_access_token, google_refresh_token, google_token_expiry, is_primary,
+              google_access_token, google_refresh_token, google_token_expiry, granted_scopes, is_primary,
               created_at, updated_at
        FROM google_account
        WHERE user_id = ?
@@ -100,10 +101,24 @@ async function listUserGoogleAccounts(userId) {
     google_email: row.google_email,
     google_name: row.google_name,
     google_token_expiry: row.google_token_expiry,
+    granted_scopes: row.granted_scopes || null,
     is_primary: Number(row.is_primary || 0) === 1,
     created_at: row.created_at || null,
     updated_at: row.updated_at || null
   }));
+}
+
+async function updateGoogleAccountScopes(userId, accountId, grantedScopes) {
+  if (!userId || !accountId) {
+    return false;
+  }
+  const [result] = await pool.execute(
+    `UPDATE google_account
+     SET granted_scopes = ?
+     WHERE user_id = ? AND account_id = ?`,
+    [grantedScopes || null, userId, accountId]
+  );
+  return Number(result.affectedRows || 0) === 1;
 }
 
 async function getGoogleAccountById(userId, accountId) {
@@ -114,7 +129,7 @@ async function getGoogleAccountById(userId, accountId) {
   try {
     const [rows] = await pool.execute(
       `SELECT account_id, user_id, google_id, google_email, google_name,
-              google_access_token, google_refresh_token, google_token_expiry, is_primary,
+              google_access_token, google_refresh_token, google_token_expiry, granted_scopes, is_primary,
               created_at, updated_at
        FROM google_account
        WHERE user_id = ? AND account_id = ?
@@ -173,6 +188,7 @@ async function saveGoogleTokens(userId, {
   accessToken,
   refreshToken,
   tokenExpiry,
+  grantedScopes = null,
   setPrimary = true
 }) {
   const connection = await pool.getConnection();
@@ -200,14 +216,15 @@ async function saveGoogleTokens(userId, {
       await connection.execute(
         `INSERT INTO google_account
           (account_id, user_id, google_id, google_email, google_name,
-           google_access_token, google_refresh_token, google_token_expiry, is_primary)
-         VALUES (UUID(), ?, ?, ?, ?, ?, ?, ?, ?)
+           google_access_token, google_refresh_token, google_token_expiry, granted_scopes, is_primary)
+         VALUES (UUID(), ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
            google_email = VALUES(google_email),
            google_name = VALUES(google_name),
            google_access_token = VALUES(google_access_token),
            google_refresh_token = COALESCE(VALUES(google_refresh_token), google_refresh_token),
            google_token_expiry = COALESCE(VALUES(google_token_expiry), google_token_expiry),
+           granted_scopes = COALESCE(VALUES(granted_scopes), granted_scopes),
            is_primary = IF(VALUES(is_primary), TRUE, is_primary),
            updated_at = CURRENT_TIMESTAMP`,
         [
@@ -218,13 +235,14 @@ async function saveGoogleTokens(userId, {
           accessToken || null,
           refreshToken || null,
           tokenExpiry || null,
+          grantedScopes || null,
           setPrimary ? 1 : 0
         ]
       );
 
       const [accountRows] = await connection.execute(
         `SELECT account_id, user_id, google_id, google_email, google_name,
-                google_access_token, google_refresh_token, google_token_expiry, is_primary,
+                google_access_token, google_refresh_token, google_token_expiry, granted_scopes, is_primary,
                 created_at, updated_at
          FROM google_account
          WHERE user_id = ? AND google_id = ?
@@ -236,7 +254,7 @@ async function saveGoogleTokens(userId, {
       if (setPrimary || !account?.is_primary) {
         const [primaryRows] = await connection.execute(
           `SELECT account_id, user_id, google_id, google_email, google_name,
-                  google_access_token, google_refresh_token, google_token_expiry, is_primary
+                  google_access_token, google_refresh_token, google_token_expiry, granted_scopes, is_primary
            FROM google_account
            WHERE user_id = ?
            ORDER BY is_primary DESC, updated_at DESC, created_at DESC
@@ -302,7 +320,7 @@ async function setPrimaryGoogleAccount(userId, accountId) {
 
     const [rows] = await connection.execute(
       `SELECT account_id, user_id, google_id, google_email, google_name,
-              google_access_token, google_refresh_token, google_token_expiry, is_primary
+              google_access_token, google_refresh_token, google_token_expiry, granted_scopes, is_primary
        FROM google_account
        WHERE user_id = ?
        ORDER BY is_primary DESC, updated_at DESC, created_at DESC
@@ -552,6 +570,48 @@ async function createEmailEvent({
   );
 }
 
+async function getEmailEventByMessage({ userId, sourceMessageId, sourceAccountEmail }) {
+  const msgId = String(sourceMessageId || "").trim();
+  const acct = String(sourceAccountEmail || "").trim();
+  if (!msgId || !acct) return null;
+
+  const [rows] = await pool.execute(
+    `SELECT id, subject, parsed_deadline, source_message_id, source_account_email, confidence_score, created_at
+     FROM email_event
+     WHERE user_id = ?
+       AND source = 'gmail'
+       AND source_account_email = ?
+       AND source_message_id = ?
+     LIMIT 1`,
+    [userId, acct, msgId]
+  );
+
+  return rows[0] || null;
+}
+
+async function upsertCalendarEventByGoogleId({ userId, googleEventId, eventDate, eventType, title, syncStatus = "synced" }) {
+  const googleId = String(googleEventId || "").trim();
+  if (!googleId) {
+    return { eventId: null, upserted: false };
+  }
+
+  // Requires a unique index on (user_id, google_event_id).
+  const eventId = randomUUID();
+  await pool.execute(
+    `INSERT INTO calendar_event
+      (event_id, user_id, event_date, event_type, title, google_event_id, sync_status)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+      event_date = VALUES(event_date),
+      event_type = VALUES(event_type),
+      title = VALUES(title),
+      sync_status = VALUES(sync_status)`,
+    [eventId, userId, eventDate, eventType, title, googleId, syncStatus]
+  );
+
+  return { eventId, upserted: true };
+}
+
 async function listCalendarEventsByUser(userId) {
   const [rows] = await pool.execute(
     `SELECT event_id, event_date, event_type, title, google_event_id, sync_status
@@ -590,20 +650,221 @@ async function getAcademiaAccount(userId) {
   return rows[0] || null;
 }
 
+function stableId(prefix, ...parts) {
+  const raw = parts.map((part) => String(part || "").trim().toLowerCase()).join("|");
+  const digest = createHash("sha1").update(raw).digest("hex").slice(0, 24);
+  return `${prefix}_${digest}`;
+}
+
+function cleanLabel(value, maxLen = 255) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, maxLen);
+}
+
+function normalizeSqlTime(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const m = raw.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!m) return null;
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  const ss = Number(m[3] || 0);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm) || !Number.isFinite(ss)) return null;
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 || ss > 59) return null;
+  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+}
+
+async function getAcademicProfileForUser(userId) {
+  const [rows] = await pool.execute(
+    `SELECT section_id, academic_unit_id, campus_id, program, current_semester, admission_year
+     FROM academic_profile
+     WHERE user_id = ?
+     LIMIT 1`,
+    [userId]
+  );
+  return rows[0] || null;
+}
+
+async function replaceSectionUnifiedTimetableFromAcademia(userId, rows) {
+  const profile = await getAcademicProfileForUser(userId);
+  if (!profile || !profile.section_id || !profile.academic_unit_id || !profile.campus_id) {
+    throw new Error("Academic profile must include section_id, academic_unit_id, and campus_id before syncing reports");
+  }
+
+  const cleanRows = (rows || [])
+    .map((row) => ({
+      dayOrder: Number.isFinite(Number(row?.dayOrder)) ? Math.max(1, Math.min(7, Math.round(Number(row.dayOrder)))) : null,
+      startTime: normalizeSqlTime(row?.startTime),
+      endTime: normalizeSqlTime(row?.endTime),
+      subjectName: cleanLabel(row?.subjectName),
+      facultyName: cleanLabel(row?.facultyName),
+      roomLabel: cleanLabel(row?.roomLabel)
+    }))
+    .filter((row) => row.subjectName);
+
+  if (cleanRows.length === 0) {
+    return { written: false, insertedEntries: 0 };
+  }
+
+  const semester = Number(profile.current_semester);
+  const normalizedSemester = Number.isFinite(semester) && semester > 0 ? Math.round(semester) : 1;
+  const academicYear = new Date().getFullYear();
+  const batch = cleanLabel(profile.program || profile.section_id, 255) || "default";
+  const unifiedTimetableId = stableId(
+    "ut",
+    profile.academic_unit_id,
+    profile.campus_id,
+    normalizedSemester,
+    batch
+  );
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    await connection.execute(
+      `INSERT INTO unified_timetable
+        (unified_timetable_id, academic_year, semester, batch, academic_unit_id, campus_id)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+        academic_year = VALUES(academic_year),
+        semester = VALUES(semester),
+        batch = VALUES(batch),
+        academic_unit_id = VALUES(academic_unit_id),
+        campus_id = VALUES(campus_id)`,
+      [
+        unifiedTimetableId,
+        academicYear,
+        normalizedSemester,
+        batch,
+        profile.academic_unit_id,
+        profile.campus_id
+      ]
+    );
+
+    const entries = [];
+    for (const row of cleanRows) {
+      const subjectId = stableId("sub", profile.academic_unit_id, normalizedSemester, row.subjectName);
+      await connection.execute(
+        `INSERT INTO subject
+          (subject_id, subject_name, credits, minimum_attendance_percentage, academic_unit_id, program, semester)
+         VALUES (?, ?, NULL, NULL, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+          subject_name = VALUES(subject_name),
+          academic_unit_id = VALUES(academic_unit_id),
+          program = VALUES(program),
+          semester = VALUES(semester)`,
+        [subjectId, row.subjectName, profile.academic_unit_id, profile.program || null, normalizedSemester]
+      );
+
+      let facultyId = null;
+      if (row.facultyName) {
+        facultyId = stableId("fac", profile.academic_unit_id, row.facultyName);
+        await connection.execute(
+          `INSERT INTO faculty (faculty_id, faculty_name, department)
+           VALUES (?, ?, NULL)
+           ON DUPLICATE KEY UPDATE faculty_name = VALUES(faculty_name)`,
+          [facultyId, row.facultyName]
+        );
+      }
+
+      let classroomId = null;
+      if (row.roomLabel) {
+        classroomId = stableId("cls", profile.campus_id, row.roomLabel);
+        await connection.execute(
+          `INSERT INTO classroom (classroom_id, room_number, building_name)
+           VALUES (?, ?, NULL)
+           ON DUPLICATE KEY UPDATE room_number = VALUES(room_number)`,
+          [classroomId, row.roomLabel]
+        );
+      }
+
+      const timetableEntryId = stableId(
+        "tte",
+        profile.section_id,
+        row.dayOrder || "",
+        row.startTime || "",
+        row.endTime || "",
+        subjectId,
+        facultyId || "",
+        classroomId || ""
+      );
+
+      entries.push({
+        timetableEntryId,
+        subjectId,
+        facultyId,
+        classroomId,
+        dayOrder: row.dayOrder,
+        startTime: row.startTime,
+        endTime: row.endTime
+      });
+    }
+
+    await connection.execute(`DELETE FROM timetable_entry WHERE section_id = ?`, [profile.section_id]);
+
+    for (const row of entries) {
+      await connection.execute(
+        `INSERT INTO timetable_entry
+          (timetable_entry_id, unified_timetable_id, section_id, subject_id, faculty_id, classroom_id, day_order, start_time, end_time)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          row.timetableEntryId,
+          unifiedTimetableId,
+          profile.section_id,
+          row.subjectId,
+          row.facultyId || null,
+          row.classroomId || null,
+          row.dayOrder,
+          row.startTime,
+          row.endTime
+        ]
+      );
+    }
+
+    await connection.commit();
+    return {
+      written: true,
+      insertedEntries: entries.length,
+      sectionId: profile.section_id,
+      unifiedTimetableId
+    };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
 async function updateAcademiaSyncState(userId, { status, lastError = null }) {
+  // Older deployments may have a shorter `last_error` column than current schema.
+  // Trim defensively so scrape failures never fail the state update itself.
+  const safeLastError = lastError ? String(lastError).slice(0, 240) : null;
   await pool.execute(
     `UPDATE academia_account
      SET status = ?,
          last_synced_at = CURRENT_TIMESTAMP,
          last_error = ?
      WHERE user_id = ?`,
-    [status, lastError, userId]
+    [status, safeLastError, userId]
   );
 }
 
 async function clearAcademiaCaches(userId) {
   await pool.execute(`DELETE FROM academia_timetable_cache WHERE user_id = ?`, [userId]);
   await pool.execute(`DELETE FROM academia_marks_cache WHERE user_id = ?`, [userId]);
+  await pool.execute(`DELETE FROM academia_attendance_cache WHERE user_id = ?`, [userId]);
+}
+
+async function clearAcademiaTimetableCache(userId) {
+  await pool.execute(`DELETE FROM academia_timetable_cache WHERE user_id = ?`, [userId]);
+}
+
+async function clearAcademiaMarksCache(userId) {
+  await pool.execute(`DELETE FROM academia_marks_cache WHERE user_id = ?`, [userId]);
+}
+
+async function clearAcademiaAttendanceCache(userId) {
   await pool.execute(`DELETE FROM academia_attendance_cache WHERE user_id = ?`, [userId]);
 }
 
@@ -706,6 +967,7 @@ module.exports = {
   clearFitGoogleAccountSelection,
   listUserGoogleAccounts,
   listUserGoogleAccountsWithTokens,
+  updateGoogleAccountScopes,
   getGoogleAccountById,
   getPrimaryGoogleAccountTokens,
   setPrimaryGoogleAccount,
@@ -722,11 +984,18 @@ module.exports = {
   getWorkoutSessionById,
   updateWorkoutGoogleSync,
   createEmailEvent,
+  getEmailEventByMessage,
   listCalendarEventsByUser,
+  upsertCalendarEventByGoogleId,
   saveAcademiaCredentials,
   getAcademiaAccount,
+  getAcademicProfileForUser,
+  replaceSectionUnifiedTimetableFromAcademia,
   updateAcademiaSyncState,
   clearAcademiaCaches,
+  clearAcademiaTimetableCache,
+  clearAcademiaMarksCache,
+  clearAcademiaAttendanceCache,
   insertAcademiaTimetableRows,
   insertAcademiaMarksRows,
   insertAcademiaAttendanceRows,

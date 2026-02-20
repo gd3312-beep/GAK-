@@ -47,9 +47,20 @@ function isOAuthConfigErrorMessage(message) {
   );
 }
 
+function normalizeGooglePurpose(purpose) {
+  const raw = String(purpose || "").trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === "calendar_gmail" || raw === "fit" || raw === "all") return raw;
+  return null;
+}
+
 async function getGoogleAuthUrl(req, res, next) {
   try {
-    const authUrl = await integrationService.startGoogleOAuth(req.user.userId);
+    const purpose = normalizeGooglePurpose(req.query?.purpose);
+    if (req.query?.purpose && !purpose) {
+      return res.status(400).json({ message: "purpose must be one of: calendar_gmail, fit, all" });
+    }
+    const authUrl = await integrationService.startGoogleOAuth(req.user.userId, { purpose });
     return res.status(200).json({ authUrl });
   } catch (error) {
     const message = String(error.message || "");
@@ -124,6 +135,22 @@ async function listCalendarEvents(req, res, next) {
   try {
     const rows = await integrationService.getCalendarEvents(req.user.userId);
     return res.status(200).json(rows);
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function syncGoogleCalendar(req, res, next) {
+  try {
+    const daysBack = req.body?.daysBack ?? req.query?.daysBack ?? 7;
+    const daysForward = req.body?.daysForward ?? req.query?.daysForward ?? 180;
+    const backNum = Number(daysBack);
+    const forwardNum = Number(daysForward);
+    const payload = await integrationService.syncGoogleCalendarEvents(req.user.userId, {
+      daysBack: Number.isFinite(backNum) ? backNum : 7,
+      daysForward: Number.isFinite(forwardNum) ? forwardNum : 180
+    });
+    return res.status(200).json(payload);
   } catch (error) {
     return next(error);
   }
@@ -253,18 +280,60 @@ async function connectAcademia(req, res, next) {
   }
 }
 
+async function captureAcademiaSession(req, res, next) {
+  try {
+    const result = await integrationService.captureAcademiaSession(req.user.userId);
+    return res.status(200).json(result);
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (message.toLowerCase().includes("not connected")) {
+      return res.status(400).json({ message });
+    }
+    return next(error);
+  }
+}
+
 async function syncAcademia(req, res, next) {
   try {
     const result = await integrationService.syncAcademiaData(req.user.userId);
     return res.status(200).json(result);
   } catch (error) {
+    const syncState = String(error?.syncState || "").trim() || null;
     if (
+      syncState
+      || (
       String(error.message || "").includes("not connected")
       || String(error.message || "").includes("failed")
       || String(error.message || "").includes("Unable to fetch")
+      || String(error.message || "").toLowerCase().includes("must include")
       || String(error.message || "").toLowerCase().includes("captcha")
+      || String(error.message || "").toLowerCase().includes("manual action")
+      )
     ) {
-      return res.status(400).json({ message: error.message });
+      return res.status(400).json({ message: error.message, syncState });
+    }
+    return next(error);
+  }
+}
+
+async function syncAcademiaReports(req, res, next) {
+  try {
+    const result = await integrationService.syncAcademiaReportsData(req.user.userId);
+    return res.status(200).json(result);
+  } catch (error) {
+    const syncState = String(error?.syncState || "").trim() || null;
+    if (
+      syncState
+      || (
+        String(error.message || "").includes("not connected")
+        || String(error.message || "").includes("failed")
+        || String(error.message || "").includes("Unable to fetch")
+        || String(error.message || "").toLowerCase().includes("must include")
+        || String(error.message || "").toLowerCase().includes("captcha")
+        || String(error.message || "").toLowerCase().includes("manual action")
+      )
+    ) {
+      return res.status(400).json({ message: error.message, syncState });
     }
     return next(error);
   }
@@ -294,6 +363,7 @@ module.exports = {
   handleGoogleCallbackPublic,
   createCalendarEvent,
   listCalendarEvents,
+  syncGoogleCalendar,
   getIntegrationStatus,
   listGoogleAccounts,
   setPrimaryGoogleAccount,
@@ -302,7 +372,9 @@ module.exports = {
   parseGmail,
   pushWorkoutToFit,
   connectAcademia,
+  captureAcademiaSession,
   syncAcademia,
+  syncAcademiaReports,
   getAcademiaStatus,
   getAcademiaData
 };

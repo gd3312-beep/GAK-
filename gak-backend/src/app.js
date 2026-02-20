@@ -28,10 +28,21 @@ assertJwtSecretsForRuntime();
 assertSecurityRuntimeConfig();
 const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 
+function normalizeOrigin(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    return parsed.origin.toLowerCase();
+  } catch (_error) {
+    return raw.replace(/\/+$/, "").toLowerCase();
+  }
+}
+
 function buildAllowedOrigins() {
   const configured = String(process.env.CORS_ORIGINS || process.env.FRONTEND_URL || "")
     .split(",")
-    .map((s) => s.trim())
+    .map((s) => normalizeOrigin(s))
     .filter(Boolean);
 
   if (configured.length) {
@@ -41,21 +52,36 @@ function buildAllowedOrigins() {
   return [
     "http://localhost:8080",
     "http://127.0.0.1:8080",
+    "http://localhost:8081",
+    "http://127.0.0.1:8081",
     "http://localhost:5173",
     "http://127.0.0.1:5173"
-  ];
+  ].map((origin) => normalizeOrigin(origin));
 }
 
 const allowedOrigins = buildAllowedOrigins();
 
+function isPrivateDevOrigin(origin) {
+  if (isProduction) return false;
+  const value = normalizeOrigin(origin);
+  if (!value) return false;
+  return /^http:\/\/(?:localhost|127\.0\.0\.1|10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2})(?::(?:8080|8081|5173))$/.test(value);
+}
+
 app.use(
   cors({
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    maxAge: 600,
     origin(origin, callback) {
       if (!origin) {
-        return callback(null, true);
+        return callback(null, !isProduction);
       }
 
-      if (allowedOrigins.includes(origin)) {
+      if (allowedOrigins.includes(normalizeOrigin(origin))) {
+        return callback(null, true);
+      }
+      if (isPrivateDevOrigin(origin)) {
         return callback(null, true);
       }
 
@@ -91,9 +117,10 @@ app.use((req, res, next) => {
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: isProduction ? 200 : 5000,
+    max: isProduction ? 120 : 5000,
     standardHeaders: true,
-    legacyHeaders: false
+    legacyHeaders: false,
+    skip: (req) => req.path === "/health"
   })
 );
 
@@ -101,7 +128,16 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, module: "dbms-backend" });
 });
 
-app.get("/api/integrations/google/callback", integrationController.handleGoogleCallbackPublic);
+app.get(
+  "/api/integrations/google/callback",
+  rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: isProduction ? 50 : 1000,
+    standardHeaders: true,
+    legacyHeaders: false
+  }),
+  integrationController.handleGoogleCallbackPublic
+);
 
 app.use("/api/users", userRoutes);
 app.use("/api/academic", authMiddleware, academicRoutes);

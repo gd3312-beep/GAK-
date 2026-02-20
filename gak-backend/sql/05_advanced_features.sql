@@ -21,11 +21,25 @@ CREATE TABLE IF NOT EXISTS google_account (
   google_access_token TEXT NOT NULL,
   google_refresh_token TEXT NULL,
   google_token_expiry DATETIME NULL,
+  granted_scopes TEXT NULL,
   is_primary BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   FOREIGN KEY (user_id) REFERENCES app_user(user_id)
 ) ENGINE=InnoDB;
+
+-- Idempotent add for existing installs (compatible with older MySQL/MariaDB).
+SET @ga_scopes_exists := (
+  SELECT COUNT(*)
+  FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE()
+    AND TABLE_NAME = 'google_account'
+    AND COLUMN_NAME = 'granted_scopes'
+);
+SET @ga_scopes_sql := IF(@ga_scopes_exists = 0, 'ALTER TABLE google_account ADD COLUMN granted_scopes TEXT NULL', 'SELECT 1');
+PREPARE ga_stmt FROM @ga_scopes_sql;
+EXECUTE ga_stmt;
+DEALLOCATE PREPARE ga_stmt;
 
 CREATE UNIQUE INDEX uq_google_account_user_google_id ON google_account (user_id, google_id);
 CREATE INDEX idx_google_account_user_primary ON google_account (user_id, is_primary, updated_at);
@@ -63,6 +77,25 @@ WHERE au.google_id IS NOT NULL
 ALTER TABLE calendar_event
   ADD COLUMN google_event_id VARCHAR(255) NULL,
   ADD COLUMN sync_status ENUM('synced', 'pending', 'failed') NOT NULL DEFAULT 'pending';
+
+-- Deduplicate calendar imports by Google event id.
+SET @calendar_google_idx := (
+  SELECT COUNT(1)
+  FROM information_schema.statistics
+  WHERE table_schema = DATABASE()
+    AND table_name = 'calendar_event'
+    AND index_name = 'uq_calendar_event_google'
+);
+
+SET @calendar_google_sql := IF(
+  @calendar_google_idx = 0,
+  'CREATE UNIQUE INDEX uq_calendar_event_google ON calendar_event (user_id, google_event_id)',
+  'SELECT 1'
+);
+
+PREPARE calendar_google_stmt FROM @calendar_google_sql;
+EXECUTE calendar_google_stmt;
+DEALLOCATE PREPARE calendar_google_stmt;
 
 ALTER TABLE workout_session
   ADD COLUMN duration_minutes INT NOT NULL DEFAULT 30,

@@ -20,7 +20,20 @@ async function getBehaviorTimeline(userId, limit = 200) {
     [userId]
   );
 
-  return rows;
+  const seen = new Set();
+  const deduped = [];
+  for (const row of rows || []) {
+    const key = String(row.title || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(row);
+  }
+
+  return deduped;
 }
 
 async function getDomainLogs(userId, domain, fromDate) {
@@ -100,9 +113,41 @@ async function getBaseAcademicStats(userId) {
     [userId]
   );
 
+  const attendanceBase = attendanceRows[0] || { total_classes: 0, attended_classes: 0, risk_subject_count: 0 };
+  const marksBase = marksRows[0] || { avg_mark_ratio: null };
+
+  if (Number(attendanceBase.total_classes || 0) <= 0) {
+    const [cacheAttendanceRows] = await pool.execute(
+      `SELECT
+        SUM(total_classes) AS total_classes,
+        SUM(attended_classes) AS attended_classes,
+        SUM(CASE WHEN attendance_percentage < 75 THEN 1 ELSE 0 END) AS risk_subject_count
+       FROM academia_attendance_cache
+       WHERE user_id = ?`,
+      [userId]
+    );
+    if (cacheAttendanceRows && cacheAttendanceRows[0]) {
+      attendanceBase.total_classes = Number(cacheAttendanceRows[0].total_classes || 0);
+      attendanceBase.attended_classes = Number(cacheAttendanceRows[0].attended_classes || 0);
+      attendanceBase.risk_subject_count = Number(cacheAttendanceRows[0].risk_subject_count || 0);
+    }
+  }
+
+  if (marksBase.avg_mark_ratio === null || marksBase.avg_mark_ratio === undefined) {
+    const [cacheMarksRows] = await pool.execute(
+      `SELECT AVG(score / NULLIF(max_score, 0)) AS avg_mark_ratio
+       FROM academia_marks_cache
+       WHERE user_id = ?`,
+      [userId]
+    );
+    if (cacheMarksRows && cacheMarksRows[0] && cacheMarksRows[0].avg_mark_ratio !== null && cacheMarksRows[0].avg_mark_ratio !== undefined) {
+      marksBase.avg_mark_ratio = cacheMarksRows[0].avg_mark_ratio;
+    }
+  }
+
   return {
-    attendance: attendanceRows[0],
-    marks: marksRows[0]
+    attendance: attendanceBase,
+    marks: marksBase
   };
 }
 
@@ -181,11 +226,59 @@ async function listSubjectSignals(userId, sinceDate = null) {
     params
   );
 
+  if (rows.length > 0) {
+    return rows;
+  }
+
+  const [cacheRows] = await pool.execute(
+    `WITH attendance AS (
+      SELECT
+        subject_name,
+        ROUND(attendance_percentage, 2) AS attendance_percentage,
+        attended_classes,
+        total_classes
+      FROM academia_attendance_cache
+      WHERE user_id = ?
+    ),
+    marks AS (
+      SELECT
+        subject_name,
+        ROUND(AVG((score / NULLIF(max_score, 0)) * 100), 2) AS marks_percentage,
+        COUNT(*) AS components_count
+      FROM academia_marks_cache
+      WHERE user_id = ?
+      GROUP BY subject_name
+    ),
+    subject_names AS (
+      SELECT subject_name FROM attendance
+      UNION
+      SELECT subject_name FROM marks
+    )
+    SELECT
+      CONCAT('academia:', LOWER(REPLACE(TRIM(sn.subject_name), ' ', '_'))) AS subject_id,
+      sn.subject_name AS subject_name,
+      a.attendance_percentage,
+      a.attended_classes,
+      a.total_classes,
+      m.marks_percentage,
+      m.components_count
+    FROM subject_names sn
+    LEFT JOIN attendance a ON a.subject_name = sn.subject_name
+    LEFT JOIN marks m ON m.subject_name = sn.subject_name
+    ORDER BY sn.subject_name ASC`,
+    [userId, userId]
+  );
+
+  if (cacheRows.length > 0) {
+    return cacheRows;
+  }
+
   return rows;
 }
 
 async function listUpcomingAcademicDeadlines(userId, limit = 6) {
   const safeLimit = Number.isFinite(Number(limit)) ? Math.max(1, Math.min(20, Number(limit))) : 6;
+  const academicTitleRegex = "assignment|due|submission|quiz|test|internal|midsem|endsem|exam|viva|project|lab|classroom|nptel|registration|last date|last day|course|semester|cie|cat|ft-i|ft-ii";
   const [rows] = await pool.execute(
     `SELECT id, title, due_date, source
      FROM (
@@ -196,6 +289,7 @@ async function listUpcomingAcademicDeadlines(userId, limit = 6) {
          'calendar' AS source
        FROM calendar_event
        WHERE user_id = ? AND event_type = 'academic' AND DATE(event_date) >= CURDATE()
+         AND LOWER(title) REGEXP ?
 
        UNION ALL
 
@@ -206,13 +300,27 @@ async function listUpcomingAcademicDeadlines(userId, limit = 6) {
          'gmail' AS source
        FROM email_event
        WHERE user_id = ? AND parsed_deadline IS NOT NULL AND DATE(parsed_deadline) >= CURDATE()
+         AND LOWER(subject) REGEXP ?
      ) upcoming
      ORDER BY due_date ASC
      LIMIT ${safeLimit}`,
-    [userId, userId]
+    [userId, academicTitleRegex, userId, academicTitleRegex]
   );
 
-  return rows;
+  const seen = new Set();
+  const deduped = [];
+  for (const row of rows || []) {
+    const key = String(row.title || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(row);
+  }
+
+  return deduped;
 }
 
 async function getTimetableLoadByDay(userId) {
@@ -276,7 +384,22 @@ async function getRecentAttendanceSnapshot(userId, days = 21) {
     hasWindow ? [userId, fromDate] : [userId]
   );
 
-  return rows[0] || { missed_count: 0, attended_count: 0, total_classes: 0 };
+  const base = rows[0] || { missed_count: 0, attended_count: 0, total_classes: 0 };
+  if (Number(base.total_classes || 0) > 0) {
+    return base;
+  }
+
+  const [cacheRows] = await pool.execute(
+    `SELECT
+      SUM(total_classes - attended_classes) AS missed_count,
+      SUM(attended_classes) AS attended_count,
+      SUM(total_classes) AS total_classes
+     FROM academia_attendance_cache
+     WHERE user_id = ?`,
+    [userId]
+  );
+
+  return cacheRows[0] || base;
 }
 
 async function getRecentMarksTrend(userId, days = 30) {
@@ -296,12 +419,28 @@ async function getRecentMarksTrend(userId, days = 30) {
       [midpoint, sinceDate, midpoint, midpoint, userId, sinceDate]
     );
 
-    return rows[0] || {
+    const base = rows[0] || {
       recent_ratio: null,
       previous_ratio: null,
       recent_components: 0,
       total_components: 0
     };
+    if (Number(base.total_components || 0) > 0) {
+      return base;
+    }
+
+    const [cacheRows] = await pool.execute(
+      `SELECT
+        AVG(score / NULLIF(max_score, 0)) AS recent_ratio,
+        NULL AS previous_ratio,
+        COUNT(*) AS recent_components,
+        COUNT(*) AS total_components
+       FROM academia_marks_cache
+       WHERE user_id = ?`,
+      [userId]
+    );
+
+    return cacheRows[0] || base;
   }
 
   const threshold = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
@@ -316,12 +455,28 @@ async function getRecentMarksTrend(userId, days = 30) {
     [threshold, threshold, threshold, userId]
   );
 
-  return rows[0] || {
+  const base = rows[0] || {
     recent_ratio: null,
     previous_ratio: null,
     recent_components: 0,
     total_components: 0
   };
+  if (Number(base.total_components || 0) > 0) {
+    return base;
+  }
+
+  const [cacheRows] = await pool.execute(
+    `SELECT
+      AVG(score / NULLIF(max_score, 0)) AS recent_ratio,
+      NULL AS previous_ratio,
+      COUNT(*) AS recent_components,
+      COUNT(*) AS total_components
+     FROM academia_marks_cache
+     WHERE user_id = ?`,
+    [userId]
+  );
+
+  return cacheRows[0] || base;
 }
 
 async function getNutritionSnapshot(userId, days = 30) {

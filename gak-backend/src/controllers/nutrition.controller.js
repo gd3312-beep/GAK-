@@ -46,6 +46,43 @@ function buildDummyFoodAnalysis(seedText) {
   }));
 }
 
+function buildDummyDailySummary(seedText) {
+  const presets = [
+    { totalCalories: 1860, totalProtein: 118, totalCarbs: 210, totalFats: 62 },
+    { totalCalories: 2040, totalProtein: 132, totalCarbs: 238, totalFats: 68 },
+    { totalCalories: 1725, totalProtein: 96, totalCarbs: 190, totalFats: 58 }
+  ];
+  const seed = String(seedText || "default");
+  const idx = seed.split("").reduce((sum, ch) => sum + ch.charCodeAt(0), 0) % presets.length;
+  return presets[idx];
+}
+
+function buildDummyMeals(seedText) {
+  const presets = [
+    [
+      { name: "Breakfast", time: "9:10 AM", calories: 420, items: "Idli • Sambar • Coffee" },
+      { name: "Lunch", time: "1:20 PM", calories: 680, items: "Rice • Dal • Salad" },
+      { name: "Snack", time: "5:30 PM", calories: 230, items: "Banana • Peanut butter" },
+      { name: "Dinner", time: "9:05 PM", calories: 530, items: "Paneer • Phulka • Curd" }
+    ],
+    [
+      { name: "Breakfast", time: "8:40 AM", calories: 390, items: "Oats • Milk • Nuts" },
+      { name: "Lunch", time: "1:05 PM", calories: 720, items: "Chicken • Rice • Veggies" },
+      { name: "Snack", time: "6:10 PM", calories: 210, items: "Buttermilk • Fruits" },
+      { name: "Dinner", time: "8:55 PM", calories: 540, items: "Dal • Roti • Salad" }
+    ],
+    [
+      { name: "Breakfast", time: "9:00 AM", calories: 440, items: "Eggs • Toast • Tea" },
+      { name: "Lunch", time: "1:30 PM", calories: 650, items: "Curd rice • Pickle • Salad" },
+      { name: "Snack", time: "5:45 PM", calories: 250, items: "Sprouts • Lemon water" },
+      { name: "Dinner", time: "9:15 PM", calories: 500, items: "Grilled chicken • Salad" }
+    ]
+  ];
+  const seed = String(seedText || "default");
+  const idx = seed.split("").reduce((sum, ch) => sum + ch.charCodeAt(0), 0) % presets.length;
+  return presets[idx];
+}
+
 async function analyzeFoodImage(req, res, next) {
   try {
     const imageDataUrl = String(req.body?.imageDataUrl || "");
@@ -146,6 +183,17 @@ async function getDailyNutrition(req, res, next) {
     const date = isIsoDate(reqDate) ? reqDate : new Date().toISOString().slice(0, 10);
 
     const summary = await analyticsService.getDailyNutritionSummary(userId, date);
+    const dummyMode = String(process.env.NUTRITION_DASHBOARD_MODE || "").trim().toLowerCase() === "dummy";
+    const hasReal =
+      Number(summary.totalCalories || 0) > 0
+      || Number(summary.totalProtein || 0) > 0
+      || Number(summary.totalCarbs || 0) > 0
+      || Number(summary.totalFats || 0) > 0;
+
+    if (dummyMode && !hasReal) {
+      const dummy = buildDummyDailySummary(`${req.user.userId}-${date}`);
+      return res.status(200).json({ date, ...dummy });
+    }
     return res.status(200).json(summary);
   } catch (error) {
     return next(error);
@@ -167,6 +215,10 @@ async function getDailyMeals(req, res, next) {
     const date = isIsoDate(reqDate) ? reqDate : new Date().toISOString().slice(0, 10);
 
     const rows = await foodModel.listMealImagesByUserAndDate(userId, date);
+    const dummyMode = String(process.env.NUTRITION_DASHBOARD_MODE || "").trim().toLowerCase() === "dummy";
+    if (dummyMode && (!rows || rows.length === 0)) {
+      return res.status(200).json({ date, meals: buildDummyMeals(`${req.user.userId}-${date}`) });
+    }
 
     const meals = new Map();
 

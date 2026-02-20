@@ -105,6 +105,14 @@ function normalizeDateOnly(input) {
   return date;
 }
 
+function toIsoDateOnly(input) {
+  const dt = new Date(input);
+  if (!Number.isNaN(dt.getTime())) {
+    return dt.toISOString().slice(0, 10);
+  }
+  return String(input || "").slice(0, 10);
+}
+
 function daysUntil(dateInput) {
   const due = normalizeDateOnly(dateInput);
   const today = normalizeDateOnly(new Date());
@@ -188,7 +196,7 @@ function buildDeadlineIntelligence({ deadlines, subjectSignals, timetableLoad, m
       id: row.id,
       title: row.title,
       source: row.source,
-      dueDateIso: String(row.due_date).slice(0, 10),
+      dueDateIso: toIsoDateOnly(row.due_date),
       daysLeft,
       status,
       optimalStart,
@@ -470,14 +478,31 @@ async function enrichBehaviorSummary(userId, base, range = "all") {
     fallbackIndexes: computedScores
   });
 
-  const baseSummary = base.summary || {
-    academic_score_index: computedScores.academicScoreIndex,
-    fitness_discipline_index: computedScores.fitnessDisciplineIndex,
-    nutrition_balance_index: computedScores.nutritionBalanceIndex,
+  const computedAllSummary = {
+    academic_score_index: rangeScores.academicScoreIndex,
+    fitness_discipline_index: rangeScores.fitnessDisciplineIndex,
+    nutrition_balance_index: rangeScores.nutritionBalanceIndex,
     overall_consistency_index: Number(
-      ((computedScores.academicScoreIndex + computedScores.fitnessDisciplineIndex + computedScores.nutritionBalanceIndex) / 3).toFixed(2)
+      ((rangeScores.academicScoreIndex + rangeScores.fitnessDisciplineIndex + rangeScores.nutritionBalanceIndex) / 3).toFixed(2)
     )
   };
+  const storedSummary = base.summary || null;
+  const storedLooksEmpty = storedSummary
+    ? (
+      Number(storedSummary.academic_score_index || 0) <= 0
+      && Number(storedSummary.fitness_discipline_index || 0) <= 0
+      && Number(storedSummary.nutrition_balance_index || 0) <= 0
+      && Number(storedSummary.overall_consistency_index || 0) <= 0
+    )
+    : false;
+  const hasLiveSignals = (
+    subjectSignals.length > 0
+    || Number(workoutSnapshot.total_actions || 0) > 0
+    || Number(nutritionSnapshot?.days_logged || 0) > 0
+  );
+  const baseSummary = (!storedSummary || (storedLooksEmpty && hasLiveSignals))
+    ? computedAllSummary
+    : storedSummary;
 
   const summary = rangeConfig.key === "all"
     ? baseSummary
@@ -539,10 +564,21 @@ async function enrichBehaviorSummary(userId, base, range = "all") {
 
 async function recomputeBehaviorSummary(userId) {
   const metrics = await behaviorModel.getMetricsForSummary(userId);
-  const indexes = computeScoreIndexes(metrics);
-  const academicScoreIndex = indexes.academicScoreIndex;
-  const fitnessDisciplineIndex = indexes.fitnessDisciplineIndex;
-  const nutritionBalanceIndex = indexes.nutritionBalanceIndex;
+  const computedScores = computeScoreIndexes(metrics);
+  const subjectSignals = await behaviorModel.listSubjectSignals(userId, null);
+  const workoutSnapshot = await behaviorModel.getRecentWorkoutSnapshot(userId, 30);
+  const attendanceSnapshot = await behaviorModel.getRecentAttendanceSnapshot(userId, 30);
+  const nutritionSnapshot = await behaviorModel.getNutritionSnapshot(userId, 30);
+  const rangeScores = computeScoreIndexesFromRange({
+    subjectSignals,
+    attendanceSnapshot,
+    workoutSnapshot,
+    nutritionSnapshot,
+    fallbackIndexes: computedScores
+  });
+  const academicScoreIndex = rangeScores.academicScoreIndex;
+  const fitnessDisciplineIndex = rangeScores.fitnessDisciplineIndex;
+  const nutritionBalanceIndex = rangeScores.nutritionBalanceIndex;
 
   const overallConsistencyIndex = Number(
     ((academicScoreIndex + fitnessDisciplineIndex + nutritionBalanceIndex) / 3).toFixed(2)
@@ -566,10 +602,21 @@ async function recomputeBehaviorSummary(userId) {
 async function getBehaviorSummary(userId, range = "all") {
   const rangeConfig = resolveRange(range);
   let base = await behaviorModel.getBehaviorSummary(userId);
+  const hasStoredSummary = Boolean(base?.summary);
+  const storedLooksEmpty = hasStoredSummary
+    ? (
+      Number(base.summary.academic_score_index || 0) <= 0
+      && Number(base.summary.fitness_discipline_index || 0) <= 0
+      && Number(base.summary.nutrition_balance_index || 0) <= 0
+      && Number(base.summary.overall_consistency_index || 0) <= 0
+    )
+    : false;
 
-  if (!base.summary && rangeConfig.key === "all") {
+  if ((!hasStoredSummary || storedLooksEmpty) && rangeConfig.key === "all") {
+    const subjectSignals = await behaviorModel.listSubjectSignals(userId, null);
+    const hasLiveSignals = subjectSignals.some((row) => row.attendance_percentage !== null || row.marks_percentage !== null);
     const metrics = await behaviorModel.getMetricsForSummary(userId);
-    if (metrics.academic || metrics.fitness || metrics.nutrition) {
+    if (metrics.academic || metrics.fitness || metrics.nutrition || hasLiveSignals) {
       return recomputeBehaviorSummary(userId);
     }
   }

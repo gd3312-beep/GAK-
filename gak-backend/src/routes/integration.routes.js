@@ -13,10 +13,13 @@ router.post("/fit/account", integrationController.setFitGoogleAccount);
 router.get("/status", integrationController.getIntegrationStatus);
 router.post("/calendar/events", integrationController.createCalendarEvent);
 router.get("/calendar/events", integrationController.listCalendarEvents);
+router.post("/calendar/sync", integrationController.syncGoogleCalendar);
 router.post("/gmail/parse", integrationController.parseGmail);
 router.post("/fit/workout", integrationController.pushWorkoutToFit);
 router.post("/academia/connect", integrationController.connectAcademia);
+router.post("/academia/capture-session", integrationController.captureAcademiaSession);
 router.post("/academia/sync", integrationController.syncAcademia);
+router.post("/academia/sync-reports", integrationController.syncAcademiaReports);
 router.get("/academia/status", integrationController.getAcademiaStatus);
 router.get("/academia/data", integrationController.getAcademiaData);
 

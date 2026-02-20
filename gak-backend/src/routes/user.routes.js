@@ -5,11 +5,14 @@ const authMiddleware = require("../middleware/auth.middleware");
 const userController = require("../controllers/user.controller");
 
 const router = express.Router();
+const isProduction = String(process.env.NODE_ENV || "").toLowerCase() === "production";
 const authRateLimit = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 25,
+  windowMs: 10 * 60 * 1000,
+  max: isProduction ? 10 : 50,
   standardHeaders: true,
-  legacyHeaders: false
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  message: { message: "Too many authentication attempts. Try again shortly." }
 });
 
 router.post("/register", authRateLimit, userController.register);
