@@ -1,0 +1,50 @@
+
+/Users/vaishnav/Documents/GAKfull/GAK copy/Frontend/src/components/ThemeProvider.tsx
+  66:14  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/vaishnav/Documents/GAKfull/GAK copy/Frontend/src/components/ui/badge.tsx
+  29:17  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/vaishnav/Documents/GAKfull/GAK copy/Frontend/src/components/ui/button.tsx
+  47:18  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/vaishnav/Documents/GAKfull/GAK copy/Frontend/src/components/ui/form.tsx
+  129:10  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/vaishnav/Documents/GAKfull/GAK copy/Frontend/src/components/ui/navigation-menu.tsx
+  111:3  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/vaishnav/Documents/GAKfull/GAK copy/Frontend/src/components/ui/sidebar.tsx
+  636:3  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/vaishnav/Documents/GAKfull/GAK copy/Frontend/src/components/ui/sonner.tsx
+  27:19  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/vaishnav/Documents/GAKfull/GAK copy/Frontend/src/components/ui/toggle.tsx
+  37:18  warning  Fast refresh only works when a file only exports components. Use a new file to share constants or functions between components  react-refresh/only-export-components
+
+/Users/vaishnav/Documents/GAKfull/GAK copy/Frontend/src/pages/Ahara.tsx
+  93:6  warning  React Hook useEffect has a missing dependency: 'load'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/vaishnav/Documents/GAKfull/GAK copy/Frontend/src/pages/HistoryAcademic.tsx
+  86:5  warning  Unused eslint-disable directive (no problems were reported from 'react-hooks/exhaustive-deps')
+
+/Users/vaishnav/Documents/GAKfull/GAK copy/Frontend/src/pages/HistoryNutrition.tsx
+  77:5  warning  Unused eslint-disable directive (no problems were reported from 'react-hooks/exhaustive-deps')
+
+/Users/vaishnav/Documents/GAKfull/GAK copy/Frontend/src/pages/HistoryWorkout.tsx
+  72:5  warning  Unused eslint-disable directive (no problems were reported from 'react-hooks/exhaustive-deps')
+
+/Users/vaishnav/Documents/GAKfull/GAK copy/Frontend/src/pages/Karma.tsx
+  170:6  warning  React Hook useEffect has a missing dependency: 'load'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/vaishnav/Documents/GAKfull/GAK copy/Frontend/src/pages/Marks.tsx
+  117:6  warning  React Hook useEffect has a missing dependency: 'load'. Either include it or remove the dependency array  react-hooks/exhaustive-deps
+
+/Users/vaishnav/Documents/GAKfull/GAK copy/Frontend/src/pages/Planner.tsx
+  154:6  warning  React Hook useEffect has a missing dependency: 'load'. Either include it or remove the dependency array                                                                                 react-hooks/exhaustive-deps
+  227:9  warning  The 'today' object construction makes the dependencies of useMemo Hook (at line 307) change on every render. To fix this, wrap the initialization of 'today' in its own useMemo() Hook  react-hooks/exhaustive-deps
+
+✖ 16 problems (0 errors, 16 warnings)
+  0 errors and 3 warnings potentially fixable with the `--fix` option.
+

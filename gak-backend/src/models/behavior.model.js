@@ -116,35 +116,6 @@ async function getBaseAcademicStats(userId) {
   const attendanceBase = attendanceRows[0] || { total_classes: 0, attended_classes: 0, risk_subject_count: 0 };
   const marksBase = marksRows[0] || { avg_mark_ratio: null };
 
-  if (Number(attendanceBase.total_classes || 0) <= 0) {
-    const [cacheAttendanceRows] = await pool.execute(
-      `SELECT
-        SUM(total_classes) AS total_classes,
-        SUM(attended_classes) AS attended_classes,
-        SUM(CASE WHEN attendance_percentage < 75 THEN 1 ELSE 0 END) AS risk_subject_count
-       FROM academia_attendance_cache
-       WHERE user_id = ?`,
-      [userId]
-    );
-    if (cacheAttendanceRows && cacheAttendanceRows[0]) {
-      attendanceBase.total_classes = Number(cacheAttendanceRows[0].total_classes || 0);
-      attendanceBase.attended_classes = Number(cacheAttendanceRows[0].attended_classes || 0);
-      attendanceBase.risk_subject_count = Number(cacheAttendanceRows[0].risk_subject_count || 0);
-    }
-  }
-
-  if (marksBase.avg_mark_ratio === null || marksBase.avg_mark_ratio === undefined) {
-    const [cacheMarksRows] = await pool.execute(
-      `SELECT AVG(score / NULLIF(max_score, 0)) AS avg_mark_ratio
-       FROM academia_marks_cache
-       WHERE user_id = ?`,
-      [userId]
-    );
-    if (cacheMarksRows && cacheMarksRows[0] && cacheMarksRows[0].avg_mark_ratio !== null && cacheMarksRows[0].avg_mark_ratio !== undefined) {
-      marksBase.avg_mark_ratio = cacheMarksRows[0].avg_mark_ratio;
-    }
-  }
-
   return {
     attendance: attendanceBase,
     marks: marksBase
@@ -226,96 +197,59 @@ async function listSubjectSignals(userId, sinceDate = null) {
     params
   );
 
-  if (rows.length > 0) {
-    return rows;
-  }
-
-  const [cacheRows] = await pool.execute(
-    `WITH attendance AS (
-      SELECT
-        subject_name,
-        ROUND(attendance_percentage, 2) AS attendance_percentage,
-        attended_classes,
-        total_classes
-      FROM academia_attendance_cache
-      WHERE user_id = ?
-    ),
-    marks AS (
-      SELECT
-        subject_name,
-        ROUND(AVG((score / NULLIF(max_score, 0)) * 100), 2) AS marks_percentage,
-        COUNT(*) AS components_count
-      FROM academia_marks_cache
-      WHERE user_id = ?
-      GROUP BY subject_name
-    ),
-    subject_names AS (
-      SELECT subject_name FROM attendance
-      UNION
-      SELECT subject_name FROM marks
-    )
-    SELECT
-      CONCAT('academia:', LOWER(REPLACE(TRIM(sn.subject_name), ' ', '_'))) AS subject_id,
-      sn.subject_name AS subject_name,
-      a.attendance_percentage,
-      a.attended_classes,
-      a.total_classes,
-      m.marks_percentage,
-      m.components_count
-    FROM subject_names sn
-    LEFT JOIN attendance a ON a.subject_name = sn.subject_name
-    LEFT JOIN marks m ON m.subject_name = sn.subject_name
-    ORDER BY sn.subject_name ASC`,
-    [userId, userId]
-  );
-
-  if (cacheRows.length > 0) {
-    return cacheRows;
-  }
-
   return rows;
 }
 
 async function listUpcomingAcademicDeadlines(userId, limit = 6) {
   const safeLimit = Number.isFinite(Number(limit)) ? Math.max(1, Math.min(20, Number(limit))) : 6;
-  const academicTitleRegex = "assignment|due|submission|quiz|test|internal|midsem|endsem|exam|viva|project|lab|classroom|nptel|registration|last date|last day|course|semester|cie|cat|ft-i|ft-ii";
+  const academicTitleRegex = "assignment|due|deadline|submission|quiz|test|internal|midsem|endsem|exam|viva|project|lab|classroom|nptel|registration|last date|last day|register by|closes on|ft-i|ft-ii";
+  const nonAcademicNoiseRegex = "newsletter|payment failed|payment reminder|invoice|delivery|uber|amazon|out of stock|new roles|roles|jobs|job|hiring|internship|market research|challenge|launch|prize|prizes|shipping|ship|product update|invitation|workshop|conclave|abstract submission|unsubscribe|webinar";
   const [rows] = await pool.execute(
-    `SELECT id, title, due_date, source
+    `SELECT id, title, due_date, source, source_account_email
      FROM (
        SELECT
          event_id AS id,
          title,
-         event_date AS due_date,
-         'calendar' AS source
+         DATE_FORMAT(event_date, '%Y-%m-%d') AS due_date,
+         'calendar' AS source,
+         NULL AS source_account_email
        FROM calendar_event
        WHERE user_id = ? AND event_type = 'academic' AND DATE(event_date) >= CURDATE()
+         AND DATE(event_date) <= DATE_ADD(CURDATE(), INTERVAL 180 DAY)
          AND LOWER(title) REGEXP ?
+         AND NOT (LOWER(title) REGEXP ?)
 
        UNION ALL
 
        SELECT
          id,
          subject AS title,
-         parsed_deadline AS due_date,
-         'gmail' AS source
+         DATE_FORMAT(parsed_deadline, '%Y-%m-%d') AS due_date,
+         'gmail' AS source,
+         source_account_email
        FROM email_event
        WHERE user_id = ? AND parsed_deadline IS NOT NULL AND DATE(parsed_deadline) >= CURDATE()
+         AND DATE(parsed_deadline) <= DATE_ADD(CURDATE(), INTERVAL 180 DAY)
+         AND confidence_score >= 0.75
          AND LOWER(subject) REGEXP ?
+         AND NOT (LOWER(subject) REGEXP ?)
      ) upcoming
      ORDER BY due_date ASC
      LIMIT ${safeLimit}`,
-    [userId, academicTitleRegex, userId, academicTitleRegex]
+    [userId, academicTitleRegex, nonAcademicNoiseRegex, userId, academicTitleRegex, nonAcademicNoiseRegex]
   );
 
   const seen = new Set();
   const deduped = [];
   for (const row of rows || []) {
-    const key = String(row.title || "")
+    const titleKey = String(row.title || "")
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, " ")
       .replace(/\s+/g, " ")
       .trim();
-    if (!key || seen.has(key)) continue;
+    const dueKey = String(row.due_date || "").slice(0, 10);
+    const key = `${titleKey}::${dueKey}`;
+    if (!titleKey || seen.has(key)) continue;
     seen.add(key);
     deduped.push(row);
   }
@@ -334,20 +268,56 @@ async function getTimetableLoadByDay(userId) {
     [userId]
   );
 
-  if (rows.length > 0) {
-    return rows;
-  }
+  return rows;
+}
 
-  const [cacheRows] = await pool.execute(
-    `SELECT day_order, COUNT(*) AS class_count
-     FROM academia_timetable_cache
-     WHERE user_id = ? AND day_order IS NOT NULL
-     GROUP BY day_order
-     ORDER BY day_order ASC`,
-    [userId]
+async function listCalendarEventsRange(userId, fromDate, toDate, limit = 1000) {
+  const safeLimit = Number.isFinite(Number(limit)) ? Math.max(10, Math.min(5000, Number(limit))) : 1000;
+  const [rows] = await pool.execute(
+    `SELECT
+      event_id,
+      DATE_FORMAT(event_date, '%Y-%m-%d') AS event_date,
+      event_type,
+      title
+     FROM calendar_event
+     WHERE user_id = ?
+       AND DATE(event_date) BETWEEN DATE(?) AND DATE(?)
+     ORDER BY event_date ASC
+     LIMIT ${safeLimit}`,
+    [userId, fromDate, toDate]
   );
+  return rows;
+}
 
-  return cacheRows;
+async function listFoodImageTimes(userId, days = 45) {
+  const safeDays = Number.isFinite(Number(days)) ? Math.max(1, Math.min(365, Number(days))) : 45;
+  const fromDate = new Date(Date.now() - safeDays * 24 * 60 * 60 * 1000);
+  const [rows] = await pool.execute(
+    `SELECT uploaded_at
+     FROM food_image
+     WHERE user_id = ?
+       AND uploaded_at >= ?
+     ORDER BY uploaded_at ASC`,
+    [userId, fromDate]
+  );
+  return rows;
+}
+
+async function listSleepActivitySessions(userId, days = 60) {
+  const safeDays = Number.isFinite(Number(days)) ? Math.max(1, Math.min(365, Number(days))) : 60;
+  const fromDate = new Date(Date.now() - safeDays * 24 * 60 * 60 * 1000);
+  const [rows] = await pool.execute(
+    `SELECT start_time, end_time, activity_type
+     FROM activity_log
+     WHERE user_id = ?
+       AND start_time IS NOT NULL
+       AND end_time IS NOT NULL
+       AND start_time >= ?
+       AND LOWER(COALESCE(activity_type, '')) REGEXP 'sleep|bed|rest|nap'
+     ORDER BY start_time ASC`,
+    [userId, fromDate]
+  );
+  return rows;
 }
 
 async function getRecentWorkoutSnapshot(userId, days = 21) {
@@ -384,22 +354,7 @@ async function getRecentAttendanceSnapshot(userId, days = 21) {
     hasWindow ? [userId, fromDate] : [userId]
   );
 
-  const base = rows[0] || { missed_count: 0, attended_count: 0, total_classes: 0 };
-  if (Number(base.total_classes || 0) > 0) {
-    return base;
-  }
-
-  const [cacheRows] = await pool.execute(
-    `SELECT
-      SUM(total_classes - attended_classes) AS missed_count,
-      SUM(attended_classes) AS attended_count,
-      SUM(total_classes) AS total_classes
-     FROM academia_attendance_cache
-     WHERE user_id = ?`,
-    [userId]
-  );
-
-  return cacheRows[0] || base;
+  return rows[0] || { missed_count: 0, attended_count: 0, total_classes: 0 };
 }
 
 async function getRecentMarksTrend(userId, days = 30) {
@@ -419,28 +374,12 @@ async function getRecentMarksTrend(userId, days = 30) {
       [midpoint, sinceDate, midpoint, midpoint, userId, sinceDate]
     );
 
-    const base = rows[0] || {
+    return rows[0] || {
       recent_ratio: null,
       previous_ratio: null,
       recent_components: 0,
       total_components: 0
     };
-    if (Number(base.total_components || 0) > 0) {
-      return base;
-    }
-
-    const [cacheRows] = await pool.execute(
-      `SELECT
-        AVG(score / NULLIF(max_score, 0)) AS recent_ratio,
-        NULL AS previous_ratio,
-        COUNT(*) AS recent_components,
-        COUNT(*) AS total_components
-       FROM academia_marks_cache
-       WHERE user_id = ?`,
-      [userId]
-    );
-
-    return cacheRows[0] || base;
   }
 
   const threshold = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
@@ -455,28 +394,12 @@ async function getRecentMarksTrend(userId, days = 30) {
     [threshold, threshold, threshold, userId]
   );
 
-  const base = rows[0] || {
+  return rows[0] || {
     recent_ratio: null,
     previous_ratio: null,
     recent_components: 0,
     total_components: 0
   };
-  if (Number(base.total_components || 0) > 0) {
-    return base;
-  }
-
-  const [cacheRows] = await pool.execute(
-    `SELECT
-      AVG(score / NULLIF(max_score, 0)) AS recent_ratio,
-      NULL AS previous_ratio,
-      COUNT(*) AS recent_components,
-      COUNT(*) AS total_components
-     FROM academia_marks_cache
-     WHERE user_id = ?`,
-    [userId]
-  );
-
-  return cacheRows[0] || base;
 }
 
 async function getNutritionSnapshot(userId, days = 30) {
@@ -510,6 +433,107 @@ async function getNutritionSnapshot(userId, days = 30) {
     over_limit_days: 0,
     protein_deficit_ratio: 0
   };
+}
+
+async function listAttendanceDailySeries(userId, fromDate, toDate) {
+  const [rows] = await pool.execute(
+    `SELECT
+      DATE_FORMAT(class_date, '%Y-%m-%d') AS day,
+      SUM(CASE WHEN attended = 1 THEN 1 ELSE 0 END) AS attended_count,
+      COUNT(*) AS total_classes
+     FROM attendance_record
+     WHERE user_id = ?
+       AND class_date BETWEEN DATE(?) AND DATE(?)
+     GROUP BY day
+     ORDER BY day ASC`,
+    [userId, fromDate, toDate]
+  );
+
+  return rows;
+}
+
+async function listWorkoutDailySeries(userId, fromDate, toDate) {
+  const [rows] = await pool.execute(
+    `SELECT
+      DATE_FORMAT(DATE(performed_at), '%Y-%m-%d') AS day,
+      SUM(CASE WHEN LOWER(status) IN ('done', 'completed') THEN 1 ELSE 0 END) AS done_count,
+      SUM(CASE WHEN LOWER(status) = 'skipped' THEN 1 ELSE 0 END) AS skipped_count,
+      COUNT(*) AS total_actions
+     FROM workout_action
+     WHERE user_id = ?
+       AND DATE(performed_at) BETWEEN DATE(?) AND DATE(?)
+     GROUP BY day
+     ORDER BY day ASC`,
+    [userId, fromDate, toDate]
+  );
+
+  return rows;
+}
+
+async function listNutritionDailySeries(userId, fromDate, toDate) {
+  const [rows] = await pool.execute(
+    `SELECT
+      DATE_FORMAT(day_total.log_date, '%Y-%m-%d') AS day,
+      day_total.calories_total,
+      day_total.protein_total
+     FROM (
+      SELECT
+        DATE(fi.uploaded_at) AS log_date,
+        SUM(cfi.calories * cfi.quantity) AS calories_total,
+        SUM(cfi.protein * cfi.quantity) AS protein_total
+      FROM food_image fi
+      JOIN detected_food_item dfi ON fi.image_id = dfi.image_id
+      JOIN confirmed_food_item cfi ON dfi.detected_id = cfi.detected_id
+      WHERE fi.user_id = ?
+        AND DATE(fi.uploaded_at) BETWEEN DATE(?) AND DATE(?)
+      GROUP BY DATE(fi.uploaded_at)
+     ) day_total
+     ORDER BY day_total.log_date ASC`,
+    [userId, fromDate, toDate]
+  );
+
+  return rows;
+}
+
+async function listFitDailySeries(userId, fromDate, toDate) {
+  try {
+    const [rows] = await pool.execute(
+      `SELECT
+        DATE_FORMAT(metric_date, '%Y-%m-%d') AS day,
+        steps,
+        calories
+       FROM fit_daily_metric
+       WHERE user_id = ?
+         AND metric_date BETWEEN DATE(?) AND DATE(?)
+       ORDER BY metric_date ASC`,
+      [userId, fromDate, toDate]
+    );
+    return rows;
+  } catch (error) {
+    if (error && error.code === "ER_NO_SUCH_TABLE") {
+      return [];
+    }
+    throw error;
+  }
+}
+
+async function listAcademicGoalDailySeries(userId, fromDate, toDate) {
+  const [rows] = await pool.execute(
+    `SELECT
+      DATE_FORMAT(DATE(deadline_date), '%Y-%m-%d') AS day,
+      SUM(CASE WHEN LOWER(status) IN ('achieved', 'completed', 'done', 'success') THEN 1 ELSE 0 END) AS achieved_count,
+      COUNT(*) AS total_goals
+     FROM academic_goal
+     WHERE user_id = ?
+       AND deadline_date IS NOT NULL
+       AND DATE(deadline_date) BETWEEN DATE(?) AND DATE(?)
+       AND LOWER(COALESCE(status, '')) NOT IN ('cancelled', 'canceled', 'deleted', 'dropped')
+     GROUP BY day
+     ORDER BY day ASC`,
+    [userId, fromDate, toDate]
+  );
+
+  return rows;
 }
 
 async function getCohortRanks(userId) {
@@ -595,10 +619,18 @@ module.exports = {
   listSubjectSignals,
   listUpcomingAcademicDeadlines,
   getTimetableLoadByDay,
+  listCalendarEventsRange,
+  listFoodImageTimes,
+  listSleepActivitySessions,
   getRecentWorkoutSnapshot,
   getRecentAttendanceSnapshot,
   getRecentMarksTrend,
   getNutritionSnapshot,
+  listAttendanceDailySeries,
+  listWorkoutDailySeries,
+  listNutritionDailySeries,
+  listFitDailySeries,
+  listAcademicGoalDailySeries,
   getCohortRanks,
   upsertBehaviorSummary,
   replaceRecommendations,

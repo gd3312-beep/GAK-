@@ -3,6 +3,7 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
+const path = require("path");
 
 dotenv.config();
 
@@ -127,6 +128,7 @@ app.use(
 app.get("/health", (_req, res) => {
   res.json({ ok: true, module: "dbms-backend" });
 });
+app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 
 app.get(
   "/api/integrations/google/callback",

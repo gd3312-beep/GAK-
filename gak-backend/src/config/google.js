@@ -11,8 +11,8 @@ const PURPOSE_SCOPES = {
     ...BASE_SCOPES,
     "https://www.googleapis.com/auth/fitness.activity.read",
     "https://www.googleapis.com/auth/fitness.activity.write",
-    // Needed for heart-rate (com.google.heart_rate.bpm) aggregates.
-    "https://www.googleapis.com/auth/fitness.body.read"
+    "https://www.googleapis.com/auth/fitness.body.read",
+    "https://www.googleapis.com/auth/fitness.heart_rate.read"
   ],
   all: [
     ...BASE_SCOPES,
@@ -20,7 +20,8 @@ const PURPOSE_SCOPES = {
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/fitness.activity.read",
     "https://www.googleapis.com/auth/fitness.activity.write",
-    "https://www.googleapis.com/auth/fitness.body.read"
+    "https://www.googleapis.com/auth/fitness.body.read",
+    "https://www.googleapis.com/auth/fitness.heart_rate.read"
   ]
 };
 
@@ -115,11 +116,22 @@ async function getTokensFromCode(code) {
   return tokens;
 }
 
-function buildAuthedClient({ accessToken, refreshToken }) {
+function toExpiryDateMs(tokenExpiry) {
+  if (!tokenExpiry) return undefined;
+  if (typeof tokenExpiry === "number" && Number.isFinite(tokenExpiry)) {
+    return tokenExpiry;
+  }
+  const parsed = new Date(tokenExpiry);
+  const ms = parsed.getTime();
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+function buildAuthedClient({ accessToken, refreshToken, tokenExpiry = null }) {
   const client = getOAuthClient();
   client.setCredentials({
     access_token: accessToken || undefined,
-    refresh_token: refreshToken || undefined
+    refresh_token: refreshToken || undefined,
+    expiry_date: toExpiryDateMs(tokenExpiry)
   });
   return client;
 }

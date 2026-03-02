@@ -1,7 +1,6 @@
-const { randomUUID } = require("crypto");
-
 const marksModel = require("../models/marks.model");
 const subjectModel = require("../models/subject.model");
+const { createId } = require("../utils/id.util");
 
 async function addMarks({ userId, subjectId, componentType, score, maxScore }) {
   const subjectExists = await subjectModel.existsById(subjectId);
@@ -18,7 +17,7 @@ async function addMarks({ userId, subjectId, componentType, score, maxScore }) {
     throw new Error("score must be between 0 and maxScore");
   }
 
-  const marksId = randomUUID();
+  const marksId = createId("mrk");
 
   await marksModel.createMarksRecord({
     marksId,

@@ -1,24 +1,96 @@
 const pool = require("../config/db");
 
-async function createWorkoutPlan({ planId, userId, source, planName = null, startTime = null, endTime = null, filePath = null }) {
-  await pool.execute(
-    `INSERT INTO workout_plan (plan_id, user_id, source, plan_name, schedule_start_time, schedule_end_time, file_path)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [planId, userId, source, planName, startTime, endTime, filePath]
-  );
+async function createWorkoutPlan({
+  planId,
+  userId,
+  source,
+  planName = null,
+  startTime = null,
+  endTime = null,
+  filePath = null,
+  estimatedCaloriesBurned = null,
+  preWorkoutMealTime = null,
+  preWorkoutMealText = null,
+  postWorkoutMealTime = null,
+  postWorkoutMealText = null
+}) {
+  try {
+    await pool.execute(
+      `INSERT INTO workout_plan
+        (plan_id, user_id, source, plan_name, schedule_start_time, schedule_end_time, file_path,
+         estimated_calories_burned, pre_workout_meal_time, pre_workout_meal_text, post_workout_meal_time, post_workout_meal_text)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        planId,
+        userId,
+        source,
+        planName,
+        startTime,
+        endTime,
+        filePath,
+        estimatedCaloriesBurned === null || estimatedCaloriesBurned === undefined ? null : Number(estimatedCaloriesBurned),
+        preWorkoutMealTime,
+        preWorkoutMealText || null,
+        postWorkoutMealTime,
+        postWorkoutMealText || null
+      ]
+    );
+  } catch (error) {
+    if (error && error.code === "ER_BAD_FIELD_ERROR") {
+      await pool.execute(
+        `INSERT INTO workout_plan (plan_id, user_id, source, plan_name, schedule_start_time, schedule_end_time, file_path)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [planId, userId, source, planName, startTime, endTime, filePath]
+      );
+    } else {
+      throw error;
+    }
+  }
 
-  return { planId, userId, source, planName, startTime, endTime, filePath };
+  return {
+    planId,
+    userId,
+    source,
+    planName,
+    startTime,
+    endTime,
+    filePath,
+    estimatedCaloriesBurned,
+    preWorkoutMealTime,
+    preWorkoutMealText,
+    postWorkoutMealTime,
+    postWorkoutMealText
+  };
 }
 
 async function getLatestWorkoutPlan(userId) {
-  const [rows] = await pool.execute(
-    `SELECT plan_id, user_id, source, plan_name, schedule_start_time, schedule_end_time, file_path, created_at
-     FROM workout_plan
-     WHERE user_id = ?
-     ORDER BY created_at DESC
-     LIMIT 1`,
-    [userId]
-  );
+  let rows;
+  try {
+    [rows] = await pool.execute(
+      `SELECT
+        plan_id, user_id, source, plan_name, schedule_start_time, schedule_end_time, file_path,
+        estimated_calories_burned, pre_workout_meal_time, pre_workout_meal_text, post_workout_meal_time, post_workout_meal_text,
+        created_at
+       FROM workout_plan
+       WHERE user_id = ?
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [userId]
+    );
+  } catch (error) {
+    if (error && error.code === "ER_BAD_FIELD_ERROR") {
+      [rows] = await pool.execute(
+        `SELECT plan_id, user_id, source, plan_name, schedule_start_time, schedule_end_time, file_path, created_at
+         FROM workout_plan
+         WHERE user_id = ?
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [userId]
+      );
+    } else {
+      throw error;
+    }
+  }
 
   return rows[0] || null;
 }

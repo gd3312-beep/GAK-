@@ -1,4 +1,5 @@
-const { randomUUID, createHash } = require("crypto");
+const { createHash } = require("crypto");
+const { createId } = require("./id.util");
 const path = require("path");
 const fs = require("fs");
 let playwright = null;
@@ -14,6 +15,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isMfaBlockEnabled() {
+  return String(process.env.ACADEMIA_ENFORCE_MFA_BLOCK || "false").toLowerCase().trim() === "true";
+}
+
 function shouldRetryScrape(error) {
   const text = String(error?.message || "").toLowerCase();
   return (
@@ -25,6 +30,36 @@ function shouldRetryScrape(error) {
     || text.includes("502")
     || text.includes("temporar")
   );
+}
+
+function isTransientNavigationError(error) {
+  const text = String(error?.message || "").toLowerCase();
+  return (
+    text.includes("err_network_changed")
+    || text.includes("err_internet_disconnected")
+    || text.includes("err_timed_out")
+    || text.includes("err_name_not_resolved")
+    || text.includes("timeout")
+    || text.includes("navigation")
+    || text.includes("net::")
+  );
+}
+
+async function gotoWithRetry(page, url, options = {}, { attempts = 3, backoffMs = 700 } = {}) {
+  const targetUrl = String(url || "");
+  let lastError = null;
+  for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
+    try {
+      return await page.goto(targetUrl, options);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts || !isTransientNavigationError(error)) {
+        throw error;
+      }
+      await sleep(backoffMs * attempt);
+    }
+  }
+  throw lastError;
 }
 
 function isFatalScrapeError(error) {
@@ -66,21 +101,153 @@ function cleanText(value) {
     .trim();
 }
 
-function parseRowsFromHtmlTables(html) {
+function parseTableRowsFromHtml(html, { preserveEmptyCells = false } = {}) {
   const tables = [...String(html || "").matchAll(/<table[\s\S]*?<\/table>/gi)].map((m) => m[0]);
-  const allRows = [];
+  const out = [];
 
   for (const table of tables) {
     const rows = [...table.matchAll(/<tr[\s\S]*?<\/tr>/gi)].map((m) => m[0]);
+    const tableRows = [];
     for (const row of rows) {
-      const cells = [...row.matchAll(/<t[hd][^>]*>([\s\S]*?)<\/t[hd]>/gi)].map((m) => cleanText(m[1])).filter(Boolean);
+      const rawCells = [...row.matchAll(/<t[hd][^>]*>([\s\S]*?)<\/t[hd]>/gi)].map((m) => cleanText(m[1]));
+      const cells = preserveEmptyCells ? rawCells : rawCells.filter(Boolean);
       if (cells.length) {
-        allRows.push(cells);
+        tableRows.push(cells);
+      }
+    }
+    if (tableRows.length) {
+      out.push(tableRows);
+    }
+  }
+
+  return out;
+}
+
+function parseRowsFromHtmlTables(html) {
+  return parseTableRowsFromHtml(html).flat();
+}
+
+function discoverTimetableHashUrls({ html = "", text = "", baseUrl = "" } = {}) {
+  const discovered = new Set();
+  const sources = [String(html || ""), String(text || "")];
+  const keepRoute = (route) => {
+    const value = String(route || "").toLowerCase();
+    if (!value.startsWith("#page:")) return false;
+    return (
+      value.includes("unified_time_table")
+      || value.includes("my_time_table")
+      || value.includes("academic_reports")
+      || value.includes("academic_calendar")
+      || value.includes("day_order")
+    );
+  };
+  const normalizedBase = String(baseUrl || "").replace(/\/+$/, "");
+
+  for (const source of sources) {
+    if (!source) continue;
+    const fullUrls = source.match(/https?:\/\/[^\s"'<>]+#Page:[A-Za-z0-9_]+/gi) || [];
+    for (const full of fullUrls) {
+      try {
+        const parsed = new URL(full);
+        if (!/academia\.srmist\.edu\.in$/i.test(parsed.hostname)) continue;
+        if (!keepRoute(parsed.hash)) continue;
+        discovered.add(`${parsed.origin}/${parsed.hash}`.replace(/\/+#/, "/#"));
+      } catch (_error) {
+        // ignore malformed URLs in scraped text/html
+      }
+    }
+
+    const hashRoutes = source.match(/#Page:[A-Za-z0-9_]+/gi) || [];
+    for (const hash of hashRoutes) {
+      if (!keepRoute(hash)) continue;
+      if (normalizedBase) {
+        discovered.add(`${normalizedBase}/${hash}`.replace(/\/+#/, "/#"));
+      } else {
+        discovered.add(hash);
       }
     }
   }
 
-  return allRows;
+  return [...discovered];
+}
+
+function discoverMarksHashUrls({ html = "", text = "", baseUrl = "" } = {}) {
+  const discovered = new Set();
+  const sources = [String(html || ""), String(text || "")];
+  const keepRoute = (route) => {
+    const value = String(route || "").toLowerCase();
+    if (!value.startsWith("#page:")) return false;
+    return value.includes("marks");
+  };
+  const normalizedBase = String(baseUrl || "").replace(/\/+$/, "");
+
+  for (const source of sources) {
+    if (!source) continue;
+    const fullUrls = source.match(/https?:\/\/[^\s"'<>]+#Page:[A-Za-z0-9_]+/gi) || [];
+    for (const full of fullUrls) {
+      try {
+        const parsed = new URL(full);
+        if (!/academia\.srmist\.edu\.in$/i.test(parsed.hostname)) continue;
+        if (!keepRoute(parsed.hash)) continue;
+        discovered.add(`${parsed.origin}/${parsed.hash}`.replace(/\/+#/, "/#"));
+      } catch (_error) {
+        // ignore malformed URLs in scraped text/html
+      }
+    }
+
+    const hashRoutes = source.match(/#Page:[A-Za-z0-9_]+/gi) || [];
+    for (const hash of hashRoutes) {
+      if (!keepRoute(hash)) continue;
+      if (normalizedBase) {
+        discovered.add(`${normalizedBase}/${hash}`.replace(/\/+#/, "/#"));
+      } else {
+        discovered.add(hash);
+      }
+    }
+  }
+
+  return [...discovered];
+}
+
+function extractBatchNumber(value) {
+  const text = String(value || "");
+  if (!text) return null;
+  const byRoute = text.match(/batch[_\-\s]?(\d{1,2})/i);
+  if (byRoute) {
+    const n = Number(byRoute[1]);
+    if (Number.isFinite(n) && n > 0) return Math.round(n);
+  }
+  const byLabel = text.match(/\bbatch\s*(\d{1,2})\b/i);
+  if (byLabel) {
+    const n = Number(byLabel[1]);
+    if (Number.isFinite(n) && n > 0) return Math.round(n);
+  }
+  return null;
+}
+
+function resolveAcademiaRouteUrl(configuredValue, fallbackUrl) {
+  const configured = String(configuredValue || "").trim();
+  const fallback = String(fallbackUrl || "").trim();
+  if (!configured) return fallback;
+  if (!fallback) return configured;
+  if (/#page:/i.test(configured)) return configured;
+
+  try {
+    const cfg = new URL(configured);
+    const fb = new URL(fallback);
+    const sameOrigin = cfg.origin === fb.origin;
+    const hasExplicitPath = Boolean(cfg.pathname && cfg.pathname !== "/");
+    const hasPageHash = Boolean(cfg.hash && /#page:/i.test(cfg.hash));
+    // Unquoted .env values like ".../#Page:My_Marks" get truncated at '#'
+    // by dotenv and become just origin/root. In that case, use fallback.
+    if (sameOrigin && !hasExplicitPath && !hasPageHash) {
+      return fallback;
+    }
+  } catch (_error) {
+    // Keep configured value if URL parsing fails.
+  }
+
+  return configured;
 }
 
 function normalizeCourseCode(value) {
@@ -95,6 +262,8 @@ function isCourseCodeLike(value) {
 }
 
 function buildCourseTitleMap(rows) {
+  const normalizedTitlesByCode = new Map();
+  const firstTitleByCode = new Map();
   const map = new Map();
   const lower = (value) => String(value || "").trim().toLowerCase();
 
@@ -111,10 +280,158 @@ function buildCourseTitleMap(rows) {
       const code = normalizeCourseCode(row[idxCode]);
       const title = cleanText(row[idxTitle] || "").slice(0, 255);
       if (!code || !title || !isCourseCodeLike(code)) continue;
-      if (!map.has(code)) map.set(code, title);
+      if (!normalizedTitlesByCode.has(code)) normalizedTitlesByCode.set(code, new Set());
+      normalizedTitlesByCode.get(code).add(title.toLowerCase());
+      if (!firstTitleByCode.has(code)) firstTitleByCode.set(code, title);
     }
   }
+
+  for (const [code, titles] of normalizedTitlesByCode.entries()) {
+    if (titles.size === 1) {
+      map.set(code, firstTitleByCode.get(code));
+    }
+  }
+
   return map;
+}
+
+function normalizeHeaderLabel(value) {
+  return cleanText(value || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function findHeaderIndex(normalizedHeaders, patterns) {
+  for (let i = 0; i < normalizedHeaders.length; i += 1) {
+    const cell = normalizedHeaders[i];
+    if (patterns.some((re) => re.test(cell))) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function isAbsentToken(value) {
+  const normalized = cleanText(value || "").toLowerCase();
+  if (!normalized) return true;
+  return /^(ab|absent|na|n\/a|null|nil|--|-)$/.test(normalized);
+}
+
+function parseNumberSafe(value) {
+  const text = cleanText(value || "");
+  if (!text || isAbsentToken(text)) return null;
+  const m = text.match(/-?\d+(?:\.\d+)?/);
+  if (!m) return null;
+  const n = Number(m[0]);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseHeaderMaxScore(headerText) {
+  const text = normalizeHeaderLabel(headerText);
+  const byOutOf = text.match(/out\s*of\s*(\d+(?:\.\d+)?)/i);
+  if (byOutOf) return Number(byOutOf[1]);
+  const byBrackets = text.match(/[\[(\/]\s*(\d+(?:\.\d+)?)\s*[\])]?$/i);
+  if (byBrackets) return Number(byBrackets[1]);
+  const byMarks = text.match(/(\d+(?:\.\d+)?)\s*marks?/i);
+  if (byMarks) return Number(byMarks[1]);
+  return null;
+}
+
+function parseMarksRowsFromDynamicHeaders(tables) {
+  const parsed = [];
+
+  for (const tableRows of tables || []) {
+    if (!Array.isArray(tableRows) || tableRows.length < 2) continue;
+
+    for (let headerAt = 0; headerAt < tableRows.length; headerAt += 1) {
+      const headerCells = tableRows[headerAt] || [];
+      const normalizedHeaders = headerCells.map(normalizeHeaderLabel);
+      if (!normalizedHeaders.length) continue;
+
+      const idxSubjectCode = findHeaderIndex(normalizedHeaders, [/\bcourse code\b/, /\bsubject code\b/, /^code$/]);
+      const idxSubjectName = findHeaderIndex(normalizedHeaders, [/\bcourse title\b/, /\bcourse name\b/, /\bsubject name\b/, /^subject$/]);
+      const idxExamType = findHeaderIndex(normalizedHeaders, [/\bexam type\b/, /\bassessment type\b/, /\bcomponent\b/, /\btest type\b/]);
+      const idxTestPerformance = findHeaderIndex(normalizedHeaders, [/\btest performance\b/, /\bperformance\b/, /\bmarks detail\b/, /\bscore detail\b/]);
+      const idxInternal = findHeaderIndex(normalizedHeaders, [/\binternal\b/, /\bcia\b/, /\bcat\b/, /\bsessional\b/]);
+      const idxExternal = findHeaderIndex(normalizedHeaders, [/\bexternal\b/, /\bend ?sem\b/, /\bese\b/]);
+      const idxTotal = findHeaderIndex(normalizedHeaders, [/\btotal\b/, /\boverall\b/, /\baggregate\b/]);
+      const idxGrade = findHeaderIndex(normalizedHeaders, [/\bgrade\b/]);
+      const idxCredits = findHeaderIndex(normalizedHeaders, [/\bcredits?\b/]);
+
+      const hasSubject = idxSubjectCode >= 0 || idxSubjectName >= 0;
+      const hasMarksColumns = [idxTestPerformance, idxInternal, idxExternal, idxTotal, idxGrade, idxCredits].some((idx) => idx >= 0);
+      if (!hasSubject || !hasMarksColumns) continue;
+
+      const maxByIndex = new Map();
+      for (let idx = 0; idx < headerCells.length; idx += 1) {
+        const max = parseHeaderMaxScore(headerCells[idx]);
+        if (Number.isFinite(max) && max > 0) {
+          maxByIndex.set(idx, Number(max));
+        }
+      }
+
+      for (const cells of tableRows.slice(headerAt + 1)) {
+        if (!Array.isArray(cells) || cells.length === 0) continue;
+        const rowText = cleanText(cells.join(" "));
+        if (!rowText) continue;
+        if (/course code|course title|subject code|subject name|test performance|hours conducted|hours absent|attn/i.test(rowText)) continue;
+
+        const subjectCodeRaw = idxSubjectCode >= 0 ? cleanText(cells[idxSubjectCode] || "") : "";
+        const subjectCode = isCourseCodeLike(subjectCodeRaw) ? normalizeCourseCode(subjectCodeRaw) : "";
+        const subjectNameRaw = idxSubjectName >= 0 ? cleanText(cells[idxSubjectName] || "") : "";
+        const subjectName = subjectNameRaw || subjectCode || "";
+        if (!subjectName) continue;
+
+        const examType = idxExamType >= 0 ? cleanText(cells[idxExamType] || "").slice(0, 255) : "";
+        const grade = idxGrade >= 0 ? cleanText(cells[idxGrade] || "").toUpperCase().slice(0, 20) : "";
+        const credits = idxCredits >= 0 ? parseNumberSafe(cells[idxCredits]) : null;
+
+        const pushComponent = (componentName, score, maxScore) => {
+          if (!componentName || !Number.isFinite(score) || !Number.isFinite(maxScore) || maxScore <= 0) return;
+          if (score < 0 || score > maxScore) return;
+          parsed.push({
+            id: createId("acad"),
+            subjectName: subjectCode || subjectName,
+            componentName: cleanText(componentName).slice(0, 255),
+            score,
+            maxScore,
+            percentage: Number(((score / maxScore) * 100).toFixed(2)),
+            subjectCode: subjectCode || null,
+            examType: examType || null,
+            grade: grade || null,
+            credits
+          });
+        };
+
+        if (idxTestPerformance >= 0) {
+          const perf = cleanText(cells[idxTestPerformance] || "");
+          const matches = [...perf.matchAll(/([A-Za-z0-9-]+)\s*\/\s*(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)/g)];
+          for (const m of matches) {
+            const componentName = cleanText(m[1] || "");
+            const maxScore = Number(m[2]);
+            const score = Number(m[3]);
+            pushComponent(componentName, score, maxScore);
+          }
+        }
+
+        const numericColumns = [
+          { idx: idxInternal, name: "internal" },
+          { idx: idxExternal, name: "external" },
+          { idx: idxTotal, name: "total" }
+        ];
+        for (const column of numericColumns) {
+          if (column.idx < 0) continue;
+          const score = parseNumberSafe(cells[column.idx]);
+          const maxScore = Number(maxByIndex.get(column.idx) || NaN);
+          if (score === null || !Number.isFinite(maxScore) || maxScore <= 0) continue;
+          pushComponent(examType || column.name, score, maxScore);
+        }
+      }
+    }
+  }
+
+  return dedupeMarksRows(parsed);
 }
 
 function parseDayOrder(value) {
@@ -132,7 +449,272 @@ function parseDayOrder(value) {
   if (/friday|fri\b/.test(text)) return 5;
   if (/saturday|sat\b/.test(text)) return 6;
   if (/sunday|sun\b/.test(text)) return 7;
+
   return null;
+}
+
+function parseDateLoose(value) {
+  const text = cleanText(value || "");
+  if (!text) return null;
+
+  const dmy = text.match(/\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b/);
+  if (dmy) {
+    let dd = Number(dmy[1]);
+    let mm = Number(dmy[2]);
+    let yy = Number(dmy[3]);
+    if (yy < 100) yy += 2000;
+    if (yy >= 2000 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+      return `${yy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+    }
+  }
+
+  const ymd = text.match(/\b(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})\b/);
+  if (ymd) {
+    const yy = Number(ymd[1]);
+    const mm = Number(ymd[2]);
+    const dd = Number(ymd[3]);
+    if (yy >= 2000 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+      return `${yy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+    }
+  }
+
+  const dayMonthYear = text.match(/\b(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{2,4})\b/);
+  if (dayMonthYear) {
+    const dd = Number(dayMonthYear[1]);
+    const mm = MONTH_NAME_MAP[String(dayMonthYear[2] || "").toLowerCase()] || 0;
+    let yy = Number(dayMonthYear[3]);
+    if (yy < 100) yy += 2000;
+    if (yy >= 2000 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+      return `${yy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+    }
+  }
+
+  return null;
+}
+
+function inferAcademicEventType(value) {
+  const text = String(value || "").toLowerCase();
+  if (!text) return "event";
+  if (text.includes("holiday") || text.includes("vacation")) return "holiday";
+  if (text.includes("exam") || text.includes("assessment") || text.includes("test")) return "exam";
+  if (text.includes("day order")) return "day_order";
+  if (text.includes("working")) return "working_day";
+  return "event";
+}
+
+const MONTH_NAME_MAP = {
+  jan: 1, january: 1,
+  feb: 2, february: 2,
+  mar: 3, march: 3,
+  apr: 4, april: 4,
+  may: 5,
+  jun: 6, june: 6,
+  jul: 7, july: 7,
+  aug: 8, august: 8,
+  sep: 9, sept: 9, september: 9,
+  oct: 10, october: 10,
+  nov: 11, november: 11,
+  dec: 12, december: 12
+};
+
+function parsePlannerMonthHeader(value) {
+  const text = cleanText(value || "");
+  if (!text) return null;
+  const m = text.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\b(?:\s*['’]?\s*(\d{2,4}))?/i);
+  if (!m) return null;
+  const month = MONTH_NAME_MAP[String(m[1] || "").toLowerCase()] || null;
+  if (!month) return null;
+
+  const yearToken = String(m[2] || "").trim();
+  if (!yearToken) return null;
+  let year = Number(yearToken);
+  if (!Number.isFinite(year)) return null;
+  if (year < 100) year += 2000;
+  if (year < 2000 || year > 2100) return null;
+  return { month, year };
+}
+
+function parsePlannerDayOrderValue(value) {
+  const text = cleanText(value || "");
+  if (!text) return null;
+  if (/^(?:-|--|—|–|na|n\/a)$/i.test(text)) return null;
+  const match = text.match(/\b([1-7])\b/);
+  if (!match) return parseDayOrder(text);
+  const day = Number(match[1]);
+  return Number.isFinite(day) && day >= 1 && day <= 7 ? day : null;
+}
+
+function parseAcademicPlannerRowsFromTable(rows) {
+  if (!Array.isArray(rows) || !rows.length) return [];
+
+  let headerAt = -1;
+  let groups = [];
+  for (let r = 0; r < rows.length; r += 1) {
+    const cells = Array.isArray(rows[r]) ? rows[r] : [];
+    if (cells.length < 4) continue;
+    const found = [];
+    for (let i = 0; i <= cells.length - 4; i += 1) {
+      const c0 = normalizeHeaderLabel(cells[i]);
+      const c1 = normalizeHeaderLabel(cells[i + 1]);
+      const c3 = normalizeHeaderLabel(cells[i + 3]);
+      const monthMeta = parsePlannerMonthHeader(cells[i + 2]);
+      if (!monthMeta) continue;
+      if (c0 !== "dt" || c1 !== "day") continue;
+      if (!(c3 === "do" || c3 === "d.o" || c3 === "day order" || c3 === "dayorder")) continue;
+      found.push({
+        dtIndex: i,
+        dayIndex: i + 1,
+        descIndex: i + 2,
+        doIndex: i + 3,
+        month: monthMeta.month,
+        year: monthMeta.year
+      });
+      i += 3;
+    }
+    if (found.length > 0) {
+      headerAt = r;
+      groups = found;
+      break;
+    }
+  }
+
+  if (headerAt < 0 || !groups.length) return [];
+
+  const out = [];
+  for (const cells of rows.slice(headerAt + 1)) {
+    if (!Array.isArray(cells) || !cells.length) continue;
+    for (const group of groups) {
+      if (group.dtIndex >= cells.length) continue;
+      const dtText = cleanText(cells[group.dtIndex] || "");
+      const dayText = cleanText(cells[group.dayIndex] || "");
+      const descText = cleanText(cells[group.descIndex] || "");
+      const doText = cleanText(cells[group.doIndex] || "");
+      const dtMatch = dtText.match(/\b(\d{1,2})\b/);
+      if (!dtMatch) continue;
+      const dayOfMonth = Number(dtMatch[1]);
+      if (!Number.isFinite(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 31) continue;
+
+      const date = `${group.year}-${String(group.month).padStart(2, "0")}-${String(dayOfMonth).padStart(2, "0")}`;
+      const dayOrder = parsePlannerDayOrderValue(doText);
+
+      let description = descText;
+      if (!description || /^(?:-|--|—|–|na|n\/a)$/i.test(description)) {
+        description = dayOrder ? `Day Order ${dayOrder}` : "";
+      } else if (dayText && !description.toLowerCase().includes(dayText.toLowerCase())) {
+        description = `${dayText} - ${description}`;
+      }
+      if (!description && dayOrder === null) continue;
+
+      out.push({
+        id: createId("acad"),
+        date,
+        dayOrder,
+        eventType: inferAcademicEventType(description || (dayOrder ? "day order" : "event")),
+        description: description.slice(0, 255)
+      });
+    }
+  }
+
+  return out;
+}
+
+function isPlannerCarryoverNoise(row) {
+  const desc = cleanText(row?.description || "").toLowerCase();
+  if (!desc) return false;
+  if (/^[1-7]$/.test(desc)) return true;
+  if (/^(mon(day)?|tue(sday)?|wed(nesday)?|thu(rsday)?|fri(day)?|sat(urday)?|sun(day)?)\s*-\s*[1-7]$/.test(desc)) {
+    return true;
+  }
+  return false;
+}
+
+function dedupeAcademicCalendarRows(rows) {
+  const map = new Map();
+  for (const row of rows || []) {
+    const date = String(row?.date || "").slice(0, 10);
+    if (!date) continue;
+    const dayOrderNum = Number(row?.dayOrder);
+    const dayOrder = Number.isFinite(dayOrderNum) && dayOrderNum >= 1 && dayOrderNum <= 7 ? Math.round(dayOrderNum) : null;
+    const eventType = cleanText(row?.eventType || "event").slice(0, 255) || "event";
+    const description = cleanText(row?.description || "").slice(0, 255);
+    const key = [date, dayOrder || "", eventType.toLowerCase(), description.toLowerCase()].join("|");
+    if (map.has(key)) continue;
+    map.set(key, {
+      id: row?.id || createId("acad"),
+      date,
+      dayOrder,
+      eventType,
+      description
+    });
+  }
+  return [...map.values()].sort((a, b) => a.date.localeCompare(b.date) || Number(a.dayOrder || 99) - Number(b.dayOrder || 99));
+}
+
+function parseAcademicCalendarRowsFromHtml(html) {
+  const tableRows = parseTableRowsFromHtml(html, { preserveEmptyCells: true });
+  const rows = parseRowsFromHtmlTables(html);
+  const out = [];
+  for (const cells of rows) {
+    if (!Array.isArray(cells) || cells.length === 0) continue;
+    const joined = cells.join(" ").trim();
+    const date = parseDateLoose(joined) || cells.map((c) => parseDateLoose(c)).find(Boolean) || null;
+    if (!date) continue;
+    const dayOrder = parseDayOrder(joined);
+    const description = cleanText(joined).slice(0, 255);
+    if (!description) continue;
+    out.push({
+      id: createId("acad"),
+      date,
+      dayOrder,
+      eventType: inferAcademicEventType(description),
+      description
+    });
+  }
+  const plannerRows = [];
+  for (const table of tableRows) {
+    plannerRows.push(...parseAcademicPlannerRowsFromTable(table));
+  }
+  if (plannerRows.length > 0) {
+    const explicitDayOrderKeys = new Set(
+      plannerRows
+        .map((row) => {
+          const day = Number(row?.dayOrder);
+          if (!Number.isFinite(day) || day < 1 || day > 7) return null;
+          return `${String(row?.date || "").slice(0, 10)}|${Math.round(day)}`;
+        })
+        .filter(Boolean)
+    );
+    const filteredGeneric = out.filter((row) => {
+      if (!isPlannerCarryoverNoise(row)) return true;
+      const day = Number(row?.dayOrder);
+      if (!Number.isFinite(day) || day < 1 || day > 7) return false;
+      return !explicitDayOrderKeys.has(`${String(row?.date || "").slice(0, 10)}|${Math.round(day)}`);
+    });
+    return dedupeAcademicCalendarRows([...filteredGeneric, ...plannerRows]);
+  }
+  return dedupeAcademicCalendarRows(out);
+}
+
+function parseAcademicCalendarRowsFromText(text) {
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const out = [];
+  for (const line of lines) {
+    const date = parseDateLoose(line);
+    if (!date) continue;
+    const description = cleanText(line).slice(0, 255);
+    if (!description) continue;
+    out.push({
+      id: createId("acad"),
+      date,
+      dayOrder: parseDayOrder(line),
+      eventType: inferAcademicEventType(line),
+      description
+    });
+  }
+  return dedupeAcademicCalendarRows(out);
 }
 
 function normalizeTime(text) {
@@ -196,12 +778,202 @@ function parseSlotTimeHints(text) {
   return hints;
 }
 
-function inferDayOrderFromSlot(slotToken) {
-  const value = String(slotToken || "").toUpperCase();
-  const m = value.match(/^([A-Z])/);
-  if (!m) return null;
-  const code = m[1].charCodeAt(0) - 64;
-  return code >= 1 && code <= 7 ? code : null;
+function normalizeSlotLookupToken(value) {
+  const raw = String(value || "").toUpperCase().replace(/\s+/g, "").trim();
+  if (!raw) return null;
+  const withoutX = raw.replace(/\/X/g, "");
+  const tokens = withoutX.match(/P\d{1,3}|L\d{1,3}|LAB\d{0,3}|[A-Z]\d?/g) || [];
+  for (const token of tokens) {
+    if (token === "X") continue;
+    return token;
+  }
+  return null;
+}
+
+function extractSlotLookupTokens(value) {
+  const raw = String(value || "").toUpperCase().replace(/\s+/g, "").trim();
+  if (!raw) return [];
+  const withoutX = raw.replace(/\/X/g, "");
+  const tokens = withoutX.match(/P\d{1,3}|L\d{1,3}|LAB\d{0,3}|[A-Z]\d?/g) || [];
+  const out = [];
+  const seen = new Set();
+  for (const token of tokens) {
+    if (!token || token === "X" || seen.has(token)) continue;
+    seen.add(token);
+    out.push(token);
+  }
+  return out;
+}
+
+function parseUnifiedTimeGridTemplateFromRows(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  const lower = (value) => String(value || "").trim().toLowerCase();
+  const timeRangeRegex = /(\d{1,2}:\d{2})\s*(?:-|to|–)\s*(\d{1,2}:\d{2})/i;
+  const parseTimeMinutes = (value) => {
+    const m = String(value || "").match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+    if (!m) return null;
+    const hh = Number(m[1]);
+    const mm = Number(m[2]);
+    if (!Number.isFinite(hh) || !Number.isFinite(mm) || hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+    return (hh * 60) + mm;
+  };
+  const formatTimeMinutes = (minutes) => {
+    const mins = Math.max(0, Math.min((24 * 60) - 1, Number(minutes)));
+    const hh = Math.floor(mins / 60);
+    const mm = mins % 60;
+    return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:00`;
+  };
+
+  const hourRowIdx = rows.findIndex((cells) => {
+    const first = lower(cells?.[0]);
+    const hasHourHeader = first.includes("hour/day") || first.includes("hour day");
+    const hasPeriods = (cells || []).some((c) => /^\d{1,2}$/.test(String(c || "").trim()));
+    return hasHourHeader && hasPeriods;
+  });
+  if (hourRowIdx < 0) return [];
+
+  const hourRow = rows[hourRowIdx] || [];
+  const slotColumns = [];
+  for (let i = 1; i < hourRow.length; i += 1) {
+    if (/^\d{1,2}$/.test(String(hourRow[i] || "").trim())) {
+      slotColumns.push(i);
+    }
+  }
+  if (!slotColumns.length) return [];
+
+  const headerRows = [];
+  if (hourRowIdx - 2 >= 0) headerRows.push(rows[hourRowIdx - 2]);
+  if (hourRowIdx - 1 >= 0) headerRows.push(rows[hourRowIdx - 1]);
+  const timeByColumn = new Map();
+  for (const colIdx of slotColumns) {
+    for (const header of headerRows) {
+      if (!Array.isArray(header) || colIdx >= header.length) continue;
+      const text = String(header[colIdx] || "");
+      if (!timeRangeRegex.test(text)) continue;
+      const { startTime, endTime } = parseTimeRange(text);
+      if (startTime && endTime) {
+        timeByColumn.set(colIdx, { startTime, endTime });
+        break;
+      }
+    }
+  }
+
+  // Unified tables render afternoon slots as 01:25/02:20... without AM/PM.
+  // Normalize slot times to a monotonic daytime sequence in 24-hour format.
+  let previousStartMinutes = null;
+  for (const colIdx of slotColumns) {
+    const range = timeByColumn.get(colIdx);
+    if (!range) continue;
+    let startMinutes = parseTimeMinutes(range.startTime);
+    let endMinutes = parseTimeMinutes(range.endTime);
+    if (startMinutes === null || endMinutes === null) continue;
+
+    if (previousStartMinutes !== null) {
+      while (startMinutes <= previousStartMinutes - 120) {
+        startMinutes += 12 * 60;
+        endMinutes += 12 * 60;
+      }
+    }
+    if (endMinutes <= startMinutes) {
+      endMinutes += 12 * 60;
+    }
+
+    if (startMinutes >= 24 * 60 || endMinutes > 24 * 60) {
+      // Avoid impossible overflows if source headers are malformed.
+      startMinutes = Math.min(startMinutes, (24 * 60) - 1);
+      endMinutes = Math.min(Math.max(startMinutes + 1, endMinutes), 24 * 60);
+    }
+
+    previousStartMinutes = startMinutes;
+    timeByColumn.set(colIdx, {
+      startTime: formatTimeMinutes(startMinutes),
+      endTime: formatTimeMinutes(Math.min(endMinutes, (24 * 60) - 1))
+    });
+  }
+
+  const template = [];
+  for (const cells of rows.slice(hourRowIdx + 1)) {
+    if (!Array.isArray(cells) || !cells.length) continue;
+    const dayLabel = String(cells[0] || "").trim();
+    const dayOrder = parseDayOrder(dayLabel);
+    if (!dayOrder) continue;
+
+    for (const colIdx of slotColumns) {
+      if (colIdx >= cells.length) continue;
+      const slotToken = normalizeSlotLookupToken(cells[colIdx]);
+      if (!slotToken) continue;
+      const range = timeByColumn.get(colIdx) || null;
+      template.push({
+        dayOrder,
+        dayLabel: `Day ${dayOrder}`,
+        slotToken,
+        startTime: range?.startTime || null,
+        endTime: range?.endTime || null
+      });
+    }
+  }
+
+  const deduped = [];
+  const seen = new Set();
+  for (const row of template) {
+    const key = [row.dayOrder, row.slotToken, row.startTime || "", row.endTime || ""].join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(row);
+  }
+  return deduped;
+}
+
+function parseUnifiedTimeGridTemplate(html) {
+  return parseUnifiedTimeGridTemplateFromRows(parseRowsFromHtmlTables(html));
+}
+
+function hydrateTimetableWithUnifiedTemplate(subjectRows, templateRows) {
+  if (!Array.isArray(subjectRows) || !subjectRows.length) return [];
+  if (!Array.isArray(templateRows) || !templateRows.length) return dedupeTimetableRows(subjectRows);
+
+  const templateBySlot = new Map();
+  for (const row of templateRows) {
+    const slot = normalizeSlotLookupToken(row?.slotToken);
+    if (!slot) continue;
+    const list = templateBySlot.get(slot) || [];
+    list.push(row);
+    templateBySlot.set(slot, list);
+  }
+  if (!templateBySlot.size) return dedupeTimetableRows(subjectRows);
+
+  const mapped = [];
+  const unmatched = [];
+  for (const row of subjectRows) {
+    const sourceSlot = row?.slot || row?.dayLabel || row?.day_label || "";
+    const slots = extractSlotLookupTokens(sourceSlot);
+    const candidates = [];
+    for (const slot of slots) {
+      const matches = templateBySlot.get(slot) || [];
+      for (const match of matches) {
+        candidates.push(match);
+      }
+    }
+    if (!candidates.length) {
+      unmatched.push(row);
+      continue;
+    }
+    for (const match of candidates) {
+      mapped.push({
+        id: row?.id || createId("acad"),
+        dayOrder: match.dayOrder || row?.dayOrder || null,
+        dayLabel: match.dayLabel || row?.dayLabel || row?.day_label || null,
+        startTime: match.startTime || row?.startTime || row?.start_time || null,
+        endTime: match.endTime || row?.endTime || row?.end_time || null,
+        subjectName: row?.subjectName || row?.subject_name,
+        facultyName: row?.facultyName || row?.faculty_name || null,
+        roomLabel: row?.roomLabel || row?.room_label || null,
+        slot: slots[0] || row?.slot || null
+      });
+    }
+  }
+
+  return dedupeTimetableRows([...mapped, ...unmatched]);
 }
 
 function parseTimetableRows(html) {
@@ -216,18 +988,24 @@ function parseTimetableRows(html) {
     }
 
     const dayLabel = cells.find((c) => /day|mon|tue|wed|thu|fri/i.test(c)) || null;
+    if (!dayLabel) {
+      continue;
+    }
     const dayOrder = parseDayOrder(dayLabel || "");
     const rangeCell = cells.find((c) => /(\d{1,2}:\d{2})\s*(?:-|to|–)\s*(\d{1,2}:\d{2})/i.test(c)) || "";
     const { startTime, endTime } = parseTimeRange(rangeCell);
 
     const remaining = cells.filter((c) => c !== dayLabel && c !== rangeCell);
     const subjectName = remaining[0] || "";
+    if (/^(from|to|hour\/day order)$/i.test(String(subjectName || "").trim())) {
+      continue;
+    }
     if (!subjectName) {
       continue;
     }
 
     parsed.push({
-      id: randomUUID(),
+      id: createId("acad"),
       dayOrder,
       dayLabel: dayLabel || null,
       startTime,
@@ -278,8 +1056,8 @@ function parseTimetableRows(html) {
     const inferred = (slotToken && slotTimeHints.get(slotToken)) || (slotToken && DEFAULT_SLOT_TIMINGS[slotToken]) || null;
 
     parsed.push({
-      id: randomUUID(),
-      dayOrder: parseDayOrder(slot) || null,
+      id: createId("acad"),
+      dayOrder: null,
       dayLabel: slotToken || slot,
       startTime: inferred ? inferred.startTime : null,
       endTime: inferred ? inferred.endTime : null,
@@ -313,18 +1091,18 @@ function parseTimetableRowsFromText(text) {
       }
     }
     if (cols.length < 3) continue;
-    const slotLike = cols.find((c) => /\b([A-Z]\d?|LAB|slot)\b/i.test(c));
+    const slotLike = cols.find((c) => /\b([A-Z]\d?|LAB|slot|P\d{1,3}|L\d{1,3})\b/i.test(c));
     if (!slotLike) continue;
 
     const subjectName = cleanText(cols[1] || cols[0] || "");
     if (!subjectName || /course code|course title|faculty/i.test(subjectName)) continue;
 
     const slotToken = normalizeSlotToken(slotLike);
-    const explicitDayOrder = parseDayOrder(line) || parseDayOrder(slotLike) || null;
+    const explicitDayOrder = parseDayOrder(line) || null;
     const inferred = (slotToken && slotTimeHints.get(slotToken)) || (slotToken && DEFAULT_SLOT_TIMINGS[slotToken]) || null;
 
     parsed.push({
-      id: randomUUID(),
+      id: createId("acad"),
       dayOrder: explicitDayOrder,
       dayLabel: String(slotToken || slotLike).slice(0, 50),
       startTime: inferred ? inferred.startTime : null,
@@ -339,35 +1117,106 @@ function parseTimetableRowsFromText(text) {
 }
 
 function parseMarksRows(html) {
-  const rows = parseRowsFromHtmlTables(html);
-  const courseTitleByCode = buildCourseTitleMap(rows);
+  const tables = parseTableRowsFromHtml(html);
+  const dynamicHeaderParsed = parseMarksRowsFromDynamicHeaders(tables);
+  if (dynamicHeaderParsed.length > 0) {
+    return dynamicHeaderParsed;
+  }
+  const rows = tables.flat();
   const lower = (value) => String(value || "").trim().toLowerCase();
-  const headerRow = rows.find((cells) => {
-    const cols = cells.map(lower);
-    return cols.includes("course code") && cols.some((c) => c.includes("test performance"));
-  });
-  if (headerRow) {
+  const parsedFromHeaderTables = [];
+
+  for (const tableRows of tables) {
+    const headerRow = tableRows.find((cells) => {
+      const cols = cells.map(lower);
+      return cols.includes("course code") && cols.some((c) => c.includes("test performance"));
+    });
+    if (!headerRow) continue;
+
     const parsedTestPerf = [];
     const headerCols = headerRow.map(lower);
     const idxCourse = headerCols.indexOf("course code");
     const idxPerf = headerCols.findIndex((c) => c.includes("test performance"));
-    const headerAt = rows.indexOf(headerRow);
+    const idxCourseTitle = headerCols.findIndex((c) => c.includes("course title"));
+    const headerAt = tableRows.indexOf(headerRow);
+    const scopedCourseTitleByCode = idxCourseTitle >= 0 ? buildCourseTitleMap(tableRows) : new Map();
+    const orderedCourseCodes = [];
+    for (const cells of tableRows.slice(headerAt + 1)) {
+      const courseCell = idxCourse >= 0 && idxCourse < cells.length ? cells[idxCourse] : "";
+      const code = normalizeCourseCode(courseCell || "");
+      if (isCourseCodeLike(code) && !orderedCourseCodes.includes(code)) {
+        orderedCourseCodes.push(code);
+      }
+    }
+    let nextCourseCursor = 0;
+    let lastCourseCode = "";
+    let lastComponentName = "";
 
-    for (const cells of rows.slice(headerAt + 1)) {
-      if (cells.length <= Math.max(idxCourse, idxPerf)) continue;
-      const courseCode = normalizeCourseCode(cells[idxCourse] || "");
-      const perf = String(cells[idxPerf] || "").trim();
-      if (!courseCode || !perf) continue;
+    for (const cells of tableRows.slice(headerAt + 1)) {
+      if (!Array.isArray(cells) || cells.length === 0) continue;
+      const rawCourseCell = idxCourse >= 0 && idxCourse < cells.length ? cells[idxCourse] : "";
+      const normalizedCourseCode = normalizeCourseCode(rawCourseCell || "");
+      if (normalizedCourseCode && isCourseCodeLike(normalizedCourseCode)) {
+        lastCourseCode = normalizedCourseCode;
+        const idx = orderedCourseCodes.indexOf(normalizedCourseCode);
+        if (idx >= 0) {
+          nextCourseCursor = idx + 1;
+        }
+      }
+      let courseCode = (normalizedCourseCode && isCourseCodeLike(normalizedCourseCode))
+        ? normalizedCourseCode
+        : lastCourseCode;
+      const perfCell = idxPerf >= 0 && idxPerf < cells.length ? cells[idxPerf] : "";
+      const perf = String(perfCell || cells[cells.length - 1] || "").trim();
+      if (!perf) continue;
+
+      // SRM sometimes renders compact continuation rows like "FT-I/5.00 3.80" without course code.
+      // When the component repeats (e.g., FT-I across many rows), rows are often new subjects.
+      // When component changes (e.g., FT-I -> FT-II), row is usually continuation for same subject.
+      const standalonePerfOnlyMatch = perf.match(/^([A-Za-z0-9-]+)\s*\/\s*\d+(?:\.\d+)?\s+\d+(?:\.\d+)?$/);
+      const standalonePerfOnly = Boolean(standalonePerfOnlyMatch);
+      const standaloneComponent = cleanText(standalonePerfOnlyMatch?.[1] || "").toLowerCase();
+      if (
+        !(normalizedCourseCode && isCourseCodeLike(normalizedCourseCode))
+        && standalonePerfOnly
+        && nextCourseCursor < orderedCourseCodes.length
+      ) {
+        const repeatedComponent = Boolean(
+          standaloneComponent
+          && lastComponentName
+          && standaloneComponent === String(lastComponentName).toLowerCase()
+        );
+        const shouldAdvanceCourse = Boolean(lastCourseCode && repeatedComponent);
+        if (shouldAdvanceCourse) {
+          courseCode = orderedCourseCodes[nextCourseCursor];
+          lastCourseCode = courseCode;
+          nextCourseCursor += 1;
+        }
+      }
+      if (!courseCode) continue;
+
+      let subjectName = courseCode;
+      const inlineCourseTitle = idxCourseTitle >= 0 && idxCourseTitle < cells.length
+        ? cleanText(cells[idxCourseTitle] || "").slice(0, 255)
+        : "";
+      if (inlineCourseTitle && !isCourseCodeLike(inlineCourseTitle)) {
+        subjectName = inlineCourseTitle;
+      } else if (scopedCourseTitleByCode.has(courseCode)) {
+        subjectName = scopedCourseTitleByCode.get(courseCode) || courseCode;
+      }
 
       const matches = [...perf.matchAll(/([A-Za-z0-9-]+)\s*\/\s*(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)/g)];
+      if (matches.length > 0) {
+        lastComponentName = cleanText(matches[0][1] || "").slice(0, 255);
+      }
       for (const m of matches) {
         const componentName = String(m[1] || "").trim();
         const maxScore = Number(m[2]);
         const score = Number(m[3]);
         if (!componentName || !Number.isFinite(maxScore) || maxScore <= 0 || !Number.isFinite(score)) continue;
         parsedTestPerf.push({
-          id: randomUUID(),
-          subjectName: courseTitleByCode.get(courseCode) || courseCode,
+          id: createId("acad"),
+          subjectName,
           componentName,
           score,
           maxScore,
@@ -377,9 +1226,15 @@ function parseMarksRows(html) {
     }
 
     if (parsedTestPerf.length > 0) {
-      return parsedTestPerf;
+      parsedFromHeaderTables.push(...parsedTestPerf);
     }
   }
+
+  if (parsedFromHeaderTables.length > 0) {
+    return dedupeMarksRows(parsedFromHeaderTables);
+  }
+
+  const courseTitleByCode = buildCourseTitleMap(rows);
 
   const parsed = [];
   let currentSubject = null;
@@ -454,7 +1309,7 @@ function parseMarksRows(html) {
     if (!subjectName) continue;
 
     parsed.push({
-      id: randomUUID(),
+      id: createId("acad"),
       subjectName,
       componentName: cleanText(componentName || "overall").slice(0, 255),
       score,
@@ -480,6 +1335,7 @@ function parseMarksRowsFromText(text) {
   const courseTitleByCode = new Map();
   let currentSubject = null;
   let pendingComponent = null;
+  let pendingMaxScore = null;
   for (const line of lines) {
     if (/course code|test performance|max score|obtained|component/i.test(line)) {
       continue;
@@ -503,6 +1359,7 @@ function parseMarksRowsFromText(text) {
       const code = normalizeCourseCode(rawSubject);
       currentSubject = isCourseCodeLike(code) ? (courseTitleByCode.get(code) || rawSubject) : rawSubject;
       pendingComponent = null;
+      pendingMaxScore = null;
       continue;
     }
 
@@ -516,7 +1373,7 @@ function parseMarksRowsFromText(text) {
         continue;
       }
       parsed.push({
-        id: randomUUID(),
+        id: createId("acad"),
         subjectName: (currentSubject || "Unknown Subject").slice(0, 255),
         componentName,
         score,
@@ -524,6 +1381,35 @@ function parseMarksRowsFromText(text) {
         percentage: Number(((score / maxScore) * 100).toFixed(2))
       });
       pendingComponent = null;
+      pendingMaxScore = null;
+      continue;
+    }
+
+    // Example split over two lines:
+    // line A: "FT-I/5.00"
+    // line B: "2.50"
+    const componentWithMaxOnly = line.match(/^([A-Za-z0-9-]+)\s*\/\s*(\d+(?:\.\d+)?)$/);
+    if (componentWithMaxOnly) {
+      pendingComponent = cleanText(componentWithMaxOnly[1]).slice(0, 255);
+      pendingMaxScore = Number(componentWithMaxOnly[2]);
+      continue;
+    }
+
+    const scoreOnly = line.match(/^(\d+(?:\.\d+)?)$/);
+    if (scoreOnly && Number.isFinite(pendingMaxScore) && pendingMaxScore > 0) {
+      const score = Number(scoreOnly[1]);
+      if (Number.isFinite(score) && score >= 0 && score <= pendingMaxScore) {
+        parsed.push({
+          id: createId("acad"),
+          subjectName: (currentSubject || "Unknown Subject").slice(0, 255),
+          componentName: cleanText(pendingComponent || "overall").slice(0, 255),
+          score,
+          maxScore: pendingMaxScore,
+          percentage: Number(((score / pendingMaxScore) * 100).toFixed(2))
+        });
+      }
+      pendingComponent = null;
+      pendingMaxScore = null;
       continue;
     }
 
@@ -535,7 +1421,7 @@ function parseMarksRowsFromText(text) {
       const maxScore = Number(ratioInline[3]);
       if (Number.isFinite(score) && Number.isFinite(maxScore) && maxScore > 0 && score >= 0) {
         parsed.push({
-          id: randomUUID(),
+          id: createId("acad"),
           subjectName: (currentSubject || "Unknown Subject").slice(0, 255),
           componentName: inlineComponent,
           score,
@@ -543,12 +1429,14 @@ function parseMarksRowsFromText(text) {
           percentage: Number(((score / maxScore) * 100).toFixed(2))
         });
         pendingComponent = null;
+        pendingMaxScore = null;
       }
       continue;
     }
 
     if (/^(ft|quiz|internal|assignment|assign|lab|practical|mid|end|cie|cat)[\w\s\-()]*$/i.test(line)) {
       pendingComponent = cleanText(line).slice(0, 255);
+      pendingMaxScore = null;
     }
   }
 
@@ -584,8 +1472,9 @@ function parseAttendanceRows(html) {
     }
 
     parsed.push({
-      id: randomUUID(),
+      id: createId("acad"),
       subjectName: cells[0],
+      courseCode: isCourseCodeLike(cells[0]) ? normalizeCourseCode(cells[0]) : null,
       attendedClasses: attended,
       totalClasses: total,
       attendancePercentage: percentage
@@ -612,6 +1501,7 @@ function parseAttendanceRows(html) {
   }
 
   const headerCols = headerRow.map(lower);
+  const idxCode = headerCols.indexOf("course code");
   const idxTitle = headerCols.indexOf("course title");
   const idxConducted = headerCols.findIndex((c) => c.includes("hours conducted"));
   const idxAbsent = headerCols.findIndex((c) => c.includes("hours absent"));
@@ -619,10 +1509,12 @@ function parseAttendanceRows(html) {
 
   const headerAt = rows.indexOf(headerRow);
   for (const cells of rows.slice(headerAt + 1)) {
-    if (cells.length <= Math.max(idxTitle, idxConducted, idxAbsent, idxPct)) {
+    if (cells.length <= Math.max(idxTitle, idxConducted, idxAbsent, idxPct, idxCode)) {
       continue;
     }
 
+    const rawCode = idxCode >= 0 ? String(cells[idxCode] || "").trim() : "";
+    const courseCode = isCourseCodeLike(rawCode) ? normalizeCourseCode(rawCode) : null;
     const subjectName = String(cells[idxTitle] || "").trim();
     const total = Number(String(cells[idxConducted] || "").replace(/[^\d]/g, ""));
     const absent = Number(String(cells[idxAbsent] || "").replace(/[^\d]/g, ""));
@@ -636,8 +1528,9 @@ function parseAttendanceRows(html) {
     const percentage = Number.isFinite(pct) ? pct : Number(((attended / total) * 100).toFixed(2));
 
     parsed.push({
-      id: randomUUID(),
+      id: createId("acad"),
       subjectName,
+      courseCode,
       attendedClasses: attended,
       totalClasses: total,
       attendancePercentage: percentage
@@ -699,7 +1592,7 @@ function parseAttendanceRowsFromText(text) {
       const pct = Number(compact[4]);
       if (subjectName && Number.isFinite(total) && total > 0 && Number.isFinite(absent) && absent >= 0) {
         parsed.push({
-          id: randomUUID(),
+          id: createId("acad"),
           subjectName,
           attendedClasses: Math.max(0, total - absent),
           totalClasses: total,
@@ -718,7 +1611,7 @@ function parseAttendanceRowsFromText(text) {
       const pct = Number(ratio[4]);
       if (subjectName && Number.isFinite(attended) && Number.isFinite(total) && total > 0) {
         parsed.push({
-          id: randomUUID(),
+          id: createId("acad"),
           subjectName,
           attendedClasses: Math.max(0, attended),
           totalClasses: total,
@@ -766,6 +1659,8 @@ function normalizeAttendanceRows(rows) {
   const sanitized = [];
   for (const row of rows || []) {
     const subjectName = cleanText(row?.subjectName || "").slice(0, 255);
+    const rawCourseCode = normalizeCourseCode(row?.courseCode || row?.course_code || "");
+    const courseCode = isCourseCodeLike(rawCourseCode) ? rawCourseCode : null;
     const attended = Number(row?.attendedClasses);
     const total = Number(row?.totalClasses);
     let pct = Number(row?.attendancePercentage);
@@ -800,8 +1695,9 @@ function normalizeAttendanceRows(rows) {
       pct = computedPct;
     }
     sanitized.push({
-      id: row?.id || randomUUID(),
+      id: row?.id || createId("acad"),
       subjectName,
+      courseCode,
       attendedClasses: safeAttended,
       totalClasses: safeTotal,
       attendancePercentage: Number(pct.toFixed(2))
@@ -842,6 +1738,8 @@ function normalizeAttendanceRows(rows) {
 
       if (subjectScore(row.subjectName) < subjectScore(existing.subjectName)) {
         deduped[i] = row;
+      } else if (!existing.courseCode && row.courseCode) {
+        deduped[i] = { ...existing, courseCode: row.courseCode };
       }
       replaced = true;
       break;
@@ -984,7 +1882,7 @@ function asAttendanceRowFromObject(obj) {
   }
 
   return {
-    id: randomUUID(),
+    id: createId("acad"),
     subjectName: subjectName.slice(0, 255),
     attendedClasses: safeAttended,
     totalClasses: safeTotal,
@@ -1031,7 +1929,7 @@ function asTimetableRowFromObject(obj) {
   const endTime = normalizeTime(endRaw) || null;
 
   return {
-    id: randomUUID(),
+    id: createId("acad"),
     dayOrder,
     dayLabel,
     startTime,
@@ -1127,7 +2025,7 @@ function parseMarksRowsFromJsonPayloads(payloads, timetableRows = []) {
         const score = Number(match[3]);
         if (!componentName || !Number.isFinite(maxScore) || maxScore <= 0 || !Number.isFinite(score)) continue;
         rows.push({
-          id: randomUUID(),
+          id: createId("acad"),
           subjectName,
           componentName,
           score,
@@ -1152,7 +2050,7 @@ function parseMarksRowsFromJsonPayloads(payloads, timetableRows = []) {
     const maxScore = parseNumberLoose(maxRaw);
     if (componentName && Number.isFinite(score) && Number.isFinite(maxScore) && maxScore > 0 && score >= 0) {
       rows.push({
-        id: randomUUID(),
+        id: createId("acad"),
         subjectName,
         componentName,
         score,
@@ -1443,51 +2341,104 @@ async function loginZohoIam({ baseUrl, uriPrefix, collegeEmail, collegePassword 
   return { cookieHeader };
 }
 
-async function scrapeAcademiaDataWithHttp({ collegeEmail, collegePassword }) {
+async function scrapeAcademiaDataWithHttp({ collegeEmail, collegePassword, scrapeMode = "full" }) {
+  const totalStartMs = Date.now();
   const baseUrl = process.env.ACADEMIA_BASE_URL || "https://academia.srmist.edu.in";
   const uriPrefix = process.env.ACADEMIA_ZOHO_URI_PREFIX || "/accounts/p/40-10002227248";
-  const timetableUrl = process.env.ACADEMIA_TIMETABLE_URL || `${baseUrl}/student/timetable`;
-  const marksUrl = process.env.ACADEMIA_MARKS_URL || `${baseUrl}/student/marks`;
-  const attendanceUrl = process.env.ACADEMIA_ATTENDANCE_URL || `${baseUrl}/student/attendance`;
+  const timetableUrl = resolveAcademiaRouteUrl(
+    process.env.ACADEMIA_TIMETABLE_URL,
+    `${baseUrl}/#Page:My_Time_Table`
+  );
+  const marksUrl = resolveAcademiaRouteUrl(
+    process.env.ACADEMIA_MARKS_URL,
+    `${baseUrl}/#Page:My_Marks`
+  );
+  const attendanceUrl = resolveAcademiaRouteUrl(
+    process.env.ACADEMIA_ATTENDANCE_URL,
+    `${baseUrl}/#Page:My_Attendance`
+  );
+  const mode = String(scrapeMode || "full").toLowerCase();
+  const needsTimetable = mode !== "marks_attendance";
+  const needsMarks = mode !== "reports";
+  const needsAttendance = mode !== "reports";
 
+  const loginStartMs = Date.now();
   const { cookieHeader } = await loginZohoIam({
     baseUrl,
     uriPrefix,
     collegeEmail: String(collegeEmail || "").trim().toLowerCase(),
     collegePassword: String(collegePassword || "")
   });
+  const loginMs = Date.now() - loginStartMs;
 
+  const pageFetchStartMs = Date.now();
   const [timetablePage, marksPage, attendancePage] = await Promise.all([
-    fetchText(timetableUrl, { cookieHeader }),
-    fetchText(marksUrl, { cookieHeader }),
-    fetchText(attendanceUrl, { cookieHeader })
+    needsTimetable ? fetchText(timetableUrl, { cookieHeader }) : Promise.resolve(null),
+    needsMarks ? fetchText(marksUrl, { cookieHeader }) : Promise.resolve(null),
+    needsAttendance ? fetchText(attendanceUrl, { cookieHeader }) : Promise.resolve(null)
   ]);
+  const pageFetchMs = Date.now() - pageFetchStartMs;
 
-  if (!timetablePage.ok || !marksPage.ok || !attendancePage.ok) {
+  const pageFailures = [timetablePage, marksPage, attendancePage]
+    .filter(Boolean)
+    .some((page) => !page.ok);
+  if (pageFailures) {
     throw new Error("Unable to fetch one or more academia pages. Verify page URLs in environment.");
   }
 
-  const timetableText = htmlToTextLines(timetablePage.text).join("\n");
-  const marksText = htmlToTextLines(marksPage.text).join("\n");
-  const attendanceText = htmlToTextLines(attendancePage.text).join("\n");
+  const parseStartMs = Date.now();
+  const timetableText = timetablePage ? htmlToTextLines(timetablePage.text).join("\n") : "";
+  const marksText = marksPage ? htmlToTextLines(marksPage.text).join("\n") : "";
+  const attendanceText = attendancePage ? htmlToTextLines(attendancePage.text).join("\n") : "";
+  const calendarText = needsTimetable
+    ? ((timetablePage ? htmlToTextLines(timetablePage.text).join("\n") : "") || (attendancePage ? htmlToTextLines(attendancePage.text).join("\n") : ""))
+    : "";
 
-  const timetableFromHtml = parseTimetableRows(timetablePage.text);
-  const marksFromHtml = parseMarksRows(marksPage.text);
-  const attendanceParsed = parseAndNormalizeAttendance({
-    html: attendancePage.text,
-    text: attendanceText
-  });
+  const timetableFromHtml = timetablePage ? parseTimetableRows(timetablePage.text) : [];
+  const marksFromHtml = marksPage ? parseMarksRows(marksPage.text) : [];
+  const academicCalendarFromHtml = needsTimetable
+    ? dedupeAcademicCalendarRows([
+      ...(timetablePage ? parseAcademicCalendarRowsFromHtml(timetablePage.text) : []),
+      ...(attendancePage ? parseAcademicCalendarRowsFromHtml(attendancePage.text) : [])
+    ])
+    : [];
+  const academicCalendarFromText = needsTimetable
+    ? dedupeAcademicCalendarRows(parseAcademicCalendarRowsFromText(calendarText))
+    : [];
+  const attendanceParsed = attendancePage
+    ? parseAndNormalizeAttendance({ html: attendancePage.text, text: attendanceText })
+    : { attendance: [], dailyEntries: [], version: null };
 
-  const timetable = timetableFromHtml.length ? timetableFromHtml : parseTimetableRowsFromText(timetableText);
-  const marks = marksFromHtml.length ? marksFromHtml : parseMarksRowsFromText(marksText);
-  const attendance = attendanceParsed.attendance;
+  const timetable = needsTimetable
+    ? (timetableFromHtml.length ? timetableFromHtml : parseTimetableRowsFromText(timetableText))
+    : [];
+  const marks = needsMarks
+    ? dedupeMarksRows([...(marksFromHtml || []), ...parseMarksRowsFromText(marksText)])
+    : [];
+  const attendance = needsAttendance ? attendanceParsed.attendance : [];
+  const academicCalendar = needsTimetable
+    ? dedupeAcademicCalendarRows([...(academicCalendarFromHtml || []), ...(academicCalendarFromText || [])])
+    : [];
+  const batchNumber = needsTimetable
+    ? extractBatchNumber(`${timetableUrl} ${timetableText}`)
+    : null;
+  const parseMs = Date.now() - parseStartMs;
 
   return {
     timetable,
     marks,
     attendance,
+    academicCalendar,
     attendanceDaily: attendanceParsed.dailyEntries,
-    attendanceVersion: attendanceParsed.version
+    attendanceVersion: attendanceParsed.version,
+    sourceUrl: needsTimetable ? timetableUrl : attendanceUrl,
+    batchNumber: Number.isFinite(batchNumber) ? batchNumber : null,
+    timings: {
+      loginMs,
+      pageFetchMs,
+      parseMs,
+      totalMs: Date.now() - totalStartMs
+    }
   };
 }
 
@@ -1548,11 +2499,29 @@ async function pageHasCaptchaChallenge(target) {
 
 async function pageHasMfaChallenge(target) {
   try {
+    const countVisible = async (locator) => {
+      const count = await locator.count().catch(() => 0);
+      let visible = 0;
+      for (let i = 0; i < count; i += 1) {
+        const isVisible = await locator.nth(i).isVisible().catch(() => false);
+        if (isVisible) visible += 1;
+      }
+      return visible;
+    };
+
     const bodyText = await getBodyText(target);
     const url = typeof target.url === "function" ? String(target.url() || "").toLowerCase() : "";
+    const sessionLimitLike = (
+      bodyText.includes("maximum concurrent sessions")
+      || bodyText.includes("concurrent active sessions limit exceeded")
+      || bodyText.includes("terminate all sessions")
+      || bodyText.includes("skip for now")
+    );
+    if (sessionLimitLike) {
+      return false;
+    }
     const keywordHit = (
       bodyText.includes("one-time password")
-      || bodyText.includes("verification code")
       || bodyText.includes("enter otp")
       || bodyText.includes("authenticator app")
       || bodyText.includes("2-step")
@@ -1565,17 +2534,35 @@ async function pageHasMfaChallenge(target) {
       || url.includes("verify")
       || url.includes("challenge")
     );
-    const otpFieldCount = await target
-      .locator("input[name*='otp' i], input[id*='otp' i], input[name*='totp' i], input[id*='totp' i], input[autocomplete='one-time-code']")
-      .count()
-      .catch(() => 0);
-    const verifyButtonCount = await target
-      .locator("button:has-text('Verify'), button:has-text('Submit code'), button:has-text('Continue')")
-      .count()
-      .catch(() => 0);
+    const otpFieldCount = await countVisible(
+      target.locator(
+        "input[name*='otp' i], input[id*='otp' i], input[name*='totp' i], input[id*='totp' i], input[name*='one_time' i], input[id*='one_time' i], input[name*='verification' i], input[id*='verification' i], input[autocomplete='one-time-code'], input[inputmode='numeric'][maxlength='6'], input[type='tel'][maxlength='6']"
+      )
+    );
+    const verifyButtonCount = await countVisible(
+      target.locator("button:has-text('Verify'), button:has-text('Submit code'), button:has-text('Continue')")
+    );
+    const passwordFieldCount = await countVisible(
+      target.locator("input[type='password'], input[name='password'], #password")
+    );
+    const emailFieldCount = await countVisible(
+      target.locator("input[type='email'], input[name='login_id'], #login_id")
+    );
 
-    // Avoid false positives from generic login text. Require URL signal or OTP UI controls.
-    return Boolean((keywordHit && (urlHit || otpFieldCount > 0 || verifyButtonCount > 0)) || otpFieldCount > 0);
+    // Avoid false positives from generic "verification" wording in non-MFA flows.
+    // Consider MFA only when OTP input exists or when verification signals appear
+    // while standard login inputs are absent.
+    if (otpFieldCount > 0 && passwordFieldCount === 0) {
+      return true;
+    }
+    return Boolean(
+      keywordHit
+      && urlHit
+      && verifyButtonCount > 0
+      && passwordFieldCount === 0
+      && emailFieldCount === 0
+      && bodyText.includes("otp")
+    );
   } catch (_error) {
     return false;
   }
@@ -1672,28 +2659,152 @@ async function anyTargetHasInvalidCredentials(targets) {
   return false;
 }
 
-async function pageHasSessionLimitExceeded(page) {
+async function pageHasSessionLimitExceeded(target) {
   try {
-    const url = String(page.url() || "");
-    if (url.includes("block-sessions")) {
+    const url = typeof target.url === "function" ? String(target.url() || "").toLowerCase() : "";
+    if (url.includes("block-sessions") || url.includes("terminate_session")) {
       return true;
     }
-    const bodyText = String(await page.textContent("body")).toLowerCase();
-    return bodyText.includes("maximum concurrent sessions") || bodyText.includes("concurrent active sessions limit exceeded");
+    const bodyText = await getBodyText(target);
+    const hasSessionCopy = (
+      bodyText.includes("maximum concurrent sessions")
+      || bodyText.includes("concurrent active sessions limit exceeded")
+      || bodyText.includes("concurrent sessions")
+      || bodyText.includes("terminate all sessions")
+      || bodyText.includes("terminate session")
+      || bodyText.includes("skip for now")
+    );
+    if (!hasSessionCopy) {
+      return false;
+    }
+    const hasActionButtons = await target
+      .locator("#terminate_session_skip, #terminate_session_submit, button:has-text('Skip for now'), button:has-text('Terminate All Sessions')")
+      .count()
+      .catch(() => 0);
+    return hasActionButtons > 0 || bodyText.includes("sessions");
   } catch (_error) {
     return false;
   }
 }
 
+async function anyTargetHasSessionLimitExceeded(targets) {
+  for (const target of targets || []) {
+    if (await pageHasSessionLimitExceeded(target)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function maybeResolveSessionLimitExceeded(page) {
-  const allowTerminate = String(process.env.ACADEMIA_TERMINATE_SESSIONS_ON_LIMIT || "").toLowerCase() === "true";
+  const forceClickInTargets = async (targets, selectors) => {
+    for (const target of targets || []) {
+      try {
+        const clicked = await target.evaluate((sels) => {
+          const canClick = (el) => el && typeof el.click === "function";
+          for (const sel of sels || []) {
+            const nodes = Array.from(document.querySelectorAll(sel));
+            for (const node of nodes) {
+              const el = node;
+              const style = window.getComputedStyle(el);
+              const hidden = style.display === "none" || style.visibility === "hidden" || style.opacity === "0";
+              if (hidden) continue;
+              if (canClick(el)) {
+                el.click();
+                return true;
+              }
+            }
+          }
+          return false;
+        }, selectors).catch(() => false);
+        if (clicked) {
+          return true;
+        }
+      } catch (_error) {
+        // continue
+      }
+    }
+    return false;
+  };
+
+  // Prefer non-destructive session continuation first.
+  // If "Skip for now" is unavailable, fall back to "Terminate all sessions".
+  const targets = await resolveZohoLoginTargets(page);
+  const skipped = await clickOnAnyTarget(
+    targets,
+    [
+      "#terminate_session_skip",
+      "input#terminate_session_skip",
+      "[name='terminate_session_skip']",
+      "button:has-text('Skip for now')",
+      "button:has-text('Skip')",
+      "button:has-text('Not now')",
+      "button:has-text('Continue this session')",
+      "a:has-text('Skip for now')"
+    ],
+    2500
+  );
+  const skippedForced = skipped
+    || await forceClickInTargets(targets, [
+      "#terminate_session_skip",
+      "input#terminate_session_skip",
+      "[name='terminate_session_skip']",
+      "[id*='skip'][id*='session']",
+      "[name*='skip'][name*='session']"
+    ]);
+  if (skippedForced) {
+    await page.waitForTimeout(2000);
+    return true;
+  }
+
+  // Some Zoho variants expose only generic continue controls on this interstitial.
+  const continued = await clickOnAnyTarget(
+    targets,
+    [
+      "button:has-text('Continue')",
+      "button:has-text('Proceed')",
+      "button:has-text('Continue this session')",
+      "input[type='submit']",
+      "button[type='submit']"
+    ],
+    2500
+  );
+  if (continued) {
+    await page.waitForTimeout(2000);
+    return true;
+  }
+
+  const terminatePolicy = String(process.env.ACADEMIA_TERMINATE_SESSIONS_ON_LIMIT || "auto").toLowerCase().trim();
+  const allowTerminate = terminatePolicy !== "false" && terminatePolicy !== "off" && terminatePolicy !== "no";
   if (!allowTerminate) {
     return false;
   }
 
-  // This logs the user out from all SRM/Zoho sessions for this account.
-  await clickFirstVisible(page, ["button:has-text('Terminate All Sessions')", "button:has-text('Terminate all sessions')"], 4000);
-  await page.waitForTimeout(2500);
+  // Last resort: terminate other sessions only when skip path is not available.
+  const terminated = await clickOnAnyTarget(
+    targets,
+    [
+      "#terminate_session_submit",
+      "input#terminate_session_submit",
+      "[name='terminate_session_submit']",
+      "button:has-text('Terminate All Sessions')",
+      "button:has-text('Terminate all sessions')",
+      "a:has-text('Terminate All Sessions')"
+    ],
+    4000
+  );
+  const terminatedForced = terminated
+    || await forceClickInTargets(targets, [
+      "#terminate_session_submit",
+      "input#terminate_session_submit",
+      "[name='terminate_session_submit']",
+      "[id*='terminate'][id*='session']",
+      "[name*='terminate'][name*='session']"
+    ]);
+  if (!terminatedForced) {
+    return false;
+  }
+  await page.waitForTimeout(3000);
   return true;
 }
 
@@ -1716,28 +2827,47 @@ async function loginViaBrowser(page, { baseUrl, collegeEmail, collegePassword })
   await clickOnAnyTarget(targets, ["#nextbtn", "button:has-text('Next')", "button:has-text('Continue')", "button:has-text('Sign in')"]);
   await page.waitForTimeout(1200);
   targets = await resolveZohoLoginTargets(page);
+  if (await anyTargetHasSessionLimitExceeded(targets)) {
+    const resolved = await maybeResolveSessionLimitExceeded(page);
+    if (resolved) {
+      await page.waitForTimeout(2000);
+      targets = await resolveZohoLoginTargets(page);
+    }
+  }
 
   if (await anyTargetHasCaptcha(targets)) {
     throw new Error(
       "Academia login blocked by captcha challenge. Complete login manually once and retry sync (use scripts/academia_capture_state.js to save a session state)."
     );
   }
-  if (await anyTargetHasMfa(targets)) {
-    throw new Error("Academia login requires manual action (MFA/OTP). Complete verification manually, then retry sync.");
-  }
 
-  const passwordOk = await fillOnAnyTarget(
+  let passwordOk = await fillOnAnyTarget(
     targets,
     ["#password", "input[name='password']", "input[name='PASSWORD']", "input[type='password']"],
     collegePassword
   );
+  if (!passwordOk) {
+    // Some flows briefly show an interstitial before password input.
+    await clickOnAnyTarget(
+      targets,
+      ["button:has-text('Continue')", "button:has-text('Proceed')", "button:has-text('Next')", "button:has-text('Not now')"],
+      1200
+    ).catch(() => undefined);
+    await page.waitForTimeout(1200);
+    targets = await resolveZohoLoginTargets(page);
+    passwordOk = await fillOnAnyTarget(
+      targets,
+      ["#password", "input[name='password']", "input[name='PASSWORD']", "input[type='password']"],
+      collegePassword
+    );
+  }
   if (!passwordOk) {
     if (await anyTargetHasCaptcha(targets)) {
       throw new Error(
         "Academia login blocked by captcha challenge. Complete login manually once and retry sync (use scripts/academia_capture_state.js to save a session state)."
       );
     }
-    if (await anyTargetHasMfa(targets)) {
+    if (isMfaBlockEnabled() && await anyTargetHasMfa(targets)) {
       throw new Error("Academia login requires manual action (MFA/OTP). Complete verification manually, then retry sync.");
     }
     throw new Error("Academia login failed: unable to find password input");
@@ -1749,12 +2879,21 @@ async function loginViaBrowser(page, { baseUrl, collegeEmail, collegePassword })
   await page.waitForTimeout(1500);
   targets = await resolveZohoLoginTargets(page);
 
-  if (await pageHasSessionLimitExceeded(page)) {
+  if (await anyTargetHasSessionLimitExceeded(targets)) {
     const resolved = await maybeResolveSessionLimitExceeded(page);
     if (!resolved) {
-      throw new Error(
-        "Academia login blocked: maximum concurrent sessions limit exceeded. Sign out of SRM/Zoho on other devices, or set ACADEMIA_TERMINATE_SESSIONS_ON_LIMIT=true to auto-terminate sessions and retry."
-      );
+      // Last recovery attempt: go to app root and see if existing cookies are still accepted.
+      await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 90000 }).catch(() => undefined);
+      await page.waitForTimeout(2500);
+      const postRecoveryTargets = await resolveZohoLoginTargets(page);
+      const stillBlocked = await anyTargetHasSessionLimitExceeded(postRecoveryTargets);
+      const hasLoginIframe = (await page.locator("iframe#signinFrame, iframe[name='zohoiam'], iframe[src*='/accounts/p/']").count().catch(() => 0)) > 0;
+      if (stillBlocked || hasLoginIframe) {
+        throw new Error(
+          "Academia login blocked: maximum concurrent sessions limit exceeded. Sign out of SRM/Zoho on other devices and retry."
+        );
+      }
+      targets = postRecoveryTargets;
     }
     // Give the post-termination redirect time to settle.
     await page.waitForTimeout(2500);
@@ -1783,7 +2922,7 @@ async function loginViaBrowser(page, { baseUrl, collegeEmail, collegePassword })
       "Academia login blocked by captcha challenge. Complete login manually once and retry sync (use scripts/academia_capture_state.js to save a session state)."
     );
   }
-  if (await anyTargetHasMfa(targets)) {
+  if (isMfaBlockEnabled() && await anyTargetHasMfa(targets)) {
     throw new Error("Academia login requires manual action (MFA/OTP). Complete verification manually, then retry sync.");
   }
 
@@ -1795,47 +2934,100 @@ async function loginViaBrowser(page, { baseUrl, collegeEmail, collegePassword })
   await page.waitForURL(/academia\.srmist\.edu\.in/i, { timeout: 60000 }).catch(() => undefined);
 }
 
-async function scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword, storageStatePath = null, storageState = null }) {
+async function scrapeAcademiaDataWithPlaywright({
+  collegeEmail,
+  collegePassword,
+  storageStatePath = null,
+  storageState = null,
+  scrapeMode = "full"
+}) {
+  const totalStartMs = Date.now();
   if (!playwright) {
     throw new Error("Playwright is not installed. Run `cd gak-backend && npm i playwright` to enable SRM Academia scraping.");
   }
 
   const baseUrl = process.env.ACADEMIA_BASE_URL || "https://academia.srmist.edu.in";
-  const attendanceUrl = process.env.ACADEMIA_ATTENDANCE_URL || `${baseUrl}/#Page:My_Attendance`;
-  const timetableUrl = process.env.ACADEMIA_TIMETABLE_URL || `${baseUrl}/#Page:My_Time_Table`;
-  const marksUrl = process.env.ACADEMIA_MARKS_URL || `${baseUrl}/#Page:My_Marks`;
-  const attendanceCandidateUrls = [...new Set([
+  const attendanceUrl = resolveAcademiaRouteUrl(
+    process.env.ACADEMIA_ATTENDANCE_URL,
+    `${baseUrl}/#Page:My_Attendance`
+  );
+  const timetableUrl = resolveAcademiaRouteUrl(
+    process.env.ACADEMIA_TIMETABLE_URL,
+    `${baseUrl}/#Page:My_Time_Table`
+  );
+  const marksUrl = resolveAcademiaRouteUrl(
+    process.env.ACADEMIA_MARKS_URL,
+    `${baseUrl}/#Page:My_Marks`
+  );
+  const mode = String(scrapeMode || "full").toLowerCase();
+  const needsTimetable = mode !== "marks_attendance";
+  const needsMarks = mode !== "reports";
+  const needsAttendance = mode !== "reports";
+
+  const attendanceCandidateUrlsFull = [...new Set([
     attendanceUrl,
     `${baseUrl}/#Page:My_Attendance`,
     `${baseUrl}/#Page:Academic_Reports_Unified`,
-    `${baseUrl}/#Page:My_Time_Table`
+    `${baseUrl}/#Page:My_Time_Table`,
+    `${baseUrl}/#Page:Academic_Calendar`
   ])];
-  const timetableCandidateUrls = [...new Set([
+  const timetableCandidateUrlsFull = [...new Set([
     timetableUrl,
     `${baseUrl}/#Page:My_Time_Table`,
+    `${baseUrl}/#Page:Unified_Time_Table`,
     `${baseUrl}/#Page:Academic_Reports_Unified`,
+    `${baseUrl}/#Page:Academic_Calendar`,
+    `${baseUrl}/#Page:Academic_Reports`,
+    `${baseUrl}/#Page:Day_Order`,
     `${baseUrl}/student/timetable`
   ])];
-  const marksCandidateUrls = [...new Set([
+  const marksCandidateUrlsFull = [...new Set([
     marksUrl,
     `${baseUrl}/#Page:My_Marks`,
     `${baseUrl}/#Page:Academic_Reports_Unified`,
     `${baseUrl}/student/marks`
   ])];
+  const attendanceCandidateUrls = needsAttendance
+    ? (mode === "marks_attendance"
+      ? [...new Set([attendanceUrl, `${baseUrl}/#Page:My_Attendance`])]
+      : attendanceCandidateUrlsFull)
+    : [];
+  const timetableCandidateUrls = needsTimetable
+    ? (mode === "reports"
+      ? [...new Set([
+          timetableUrl,
+          `${baseUrl}/#Page:My_Time_Table`,
+          `${baseUrl}/#Page:Unified_Time_Table`,
+          `${baseUrl}/#Page:Academic_Reports_Unified`,
+          `${baseUrl}/#Page:Academic_Calendar`,
+          `${baseUrl}/#Page:Academic_Reports`,
+          `${baseUrl}/#Page:Day_Order`
+        ])]
+      : timetableCandidateUrlsFull)
+    : [];
+  const marksCandidateUrls = needsMarks
+    ? (mode === "marks_attendance"
+      ? [...new Set([marksUrl, `${baseUrl}/#Page:My_Marks`, `${baseUrl}/student/marks`])]
+      : marksCandidateUrlsFull)
+    : [];
 
   const headlessRaw = String(process.env.ACADEMIA_PLAYWRIGHT_HEADLESS || "").trim().toLowerCase();
-  const headless = headlessRaw === "false" ? false : true;
+  const forceHeadlessSync = String(process.env.ACADEMIA_FORCE_HEADLESS_SYNC || "true").toLowerCase().trim() !== "false";
+  const headless = forceHeadlessSync ? true : (headlessRaw === "false" ? false : true);
   const debug = String(process.env.ACADEMIA_DEBUG_SCRAPE || "").toLowerCase() === "true";
-  const effectiveStatePath = storageStatePath || String(process.env.ACADEMIA_STORAGE_STATE_PATH || "").trim();
+  const configuredStatePath = storageStatePath || String(process.env.ACADEMIA_STORAGE_STATE_PATH || "").trim();
+  const effectiveStatePath = configuredStatePath && fs.existsSync(configuredStatePath) ? configuredStatePath : null;
 
   const browser = await playwright.chromium.launch({ headless });
   const context = await browser.newContext({
     viewport: { width: 1440, height: 900 },
     userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
-    storageState: storageState || (effectiveStatePath ? effectiveStatePath : undefined)
+    storageState: storageState || (effectiveStatePath || undefined)
   });
   const page = await context.newPage();
   const jsonPayloads = [];
+  let loginMs = 0;
+  let pageFetchMs = 0;
 
   const responseListener = async (response) => {
     try {
@@ -1870,23 +3062,33 @@ async function scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword,
 
     const hasLoginIframe = (await page.locator("iframe#signinFrame, iframe[name='zohoiam'], iframe[src*='/accounts/p/']").count().catch(() => 0)) > 0;
     if (hasLoginIframe) {
+      const loginStartMs = Date.now();
       await loginViaBrowser(page, {
         baseUrl,
         collegeEmail: String(collegeEmail || "").trim().toLowerCase(),
         collegePassword: String(collegePassword || "")
       });
+      loginMs = Date.now() - loginStartMs;
     }
 
     const gotoAndExtract = async (url, kind = "generic") => {
       // The SRM portal is a hash-based SPA and can keep long-polling connections open,
       // so `networkidle` is not always a reliable signal that data tables are rendered.
-      const settleMs = Math.max(1500, Number(process.env.ACADEMIA_SPA_SETTLE_MS || 20000));
+      const defaultSettleMs = mode === "marks_attendance" ? 8000 : mode === "reports" ? 15000 : 20000;
+      const configuredSettleMs = Number(process.env.ACADEMIA_SPA_SETTLE_MS || defaultSettleMs);
+      const maxSettleMs = mode === "marks_attendance" ? 12000 : 25000;
+      const settleMs = Math.min(maxSettleMs, Math.max(1500, configuredSettleMs));
 
       const hashIdx = String(url || "").indexOf("#");
       const base = hashIdx >= 0 ? String(url).slice(0, hashIdx) : String(url);
       const hash = hashIdx >= 0 ? String(url).slice(hashIdx) : "";
 
-      await page.goto(base || url, { waitUntil: "domcontentloaded", timeout: 90000 });
+      await gotoWithRetry(
+        page,
+        base || url,
+        { waitUntil: "domcontentloaded", timeout: 90000 },
+        { attempts: 3, backoffMs: 800 }
+      );
       if (hash) {
         await page.evaluate((h) => {
           if (typeof h === "string" && h && window.location.hash !== h) {
@@ -1898,19 +3100,49 @@ async function scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword,
       const start = Date.now();
       let lastHtml = null;
       let lastText = "";
+      let marksNavProbeDone = false;
 
       const dismissOverlaysBestEffort = async () => {
         const candidates = [
           "button:has-text('Skip')",
+          "button:has-text('Skip now')",
           "button:has-text('Not now')",
+          "button:has-text('No thanks')",
           "button:has-text('Later')",
+          "button:has-text('Maybe later')",
           "button:has-text('Continue')",
+          "button:has-text('Continue anyway')",
+          "button:has-text('Dismiss')",
           "[aria-label='Close']",
           "button[aria-label='Close']",
-          "button:has-text('Close')"
+          "button:has-text('Close')",
+          "button:has-text('Done')"
         ];
-        for (const sel of candidates) {
-          await page.locator(sel).first().click({ timeout: 800 }).catch(() => undefined);
+        await page.keyboard.press("Escape").catch(() => undefined);
+
+        const targets = [page.mainFrame(), ...page.frames().filter((f) => f !== page.mainFrame())];
+        for (const frame of targets) {
+          for (const sel of candidates) {
+            await frame.locator(sel).first().click({ timeout: 500 }).catch(() => undefined);
+          }
+          await frame.evaluate(() => {
+            const phrases = ["upgrade to creator", "creator 5", "upgrade now", "switch to creator", "creator plan"];
+            const nodes = Array.from(document.querySelectorAll("[role='dialog'], .modal, .popup, .overlay, .modal-backdrop, .popup-backdrop, .overlay-backdrop, div, section"));
+            for (const node of nodes) {
+              const el = node;
+              if (!(el instanceof HTMLElement)) continue;
+              const style = window.getComputedStyle(el);
+              const z = Number.parseInt(String(style.zIndex || "0"), 10);
+              const isBlockingPosition = style.position === "fixed" || style.position === "sticky" || z >= 999;
+              if (!isBlockingPosition) continue;
+              const text = String(el.innerText || "").toLowerCase().replace(/\s+/g, " ").trim();
+              const hasPhrase = phrases.some((p) => text.includes(p));
+              const isBackdrop = !text && (style.pointerEvents !== "none" || style.opacity === "1");
+              if (hasPhrase || isBackdrop) {
+                el.remove();
+              }
+            }
+          }).catch(() => undefined);
         }
       };
 
@@ -1928,27 +3160,48 @@ async function scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword,
         return targets;
       };
 
+      const frameSignalScore = (kindHint, html, text) => {
+        const tableRows = parseRowsFromHtmlTables(html).length;
+        const timetableRows = parseTimetableRows(html).length + parseTimetableRowsFromText(text).length;
+        const marksRows = parseMarksRows(html).length + parseMarksRowsFromText(text).length;
+        const attendanceRows = parseAndNormalizeAttendance({ html, text }).attendance.length;
+        const unifiedTemplateRows = parseUnifiedTimeGridTemplate(html).length;
+        const calendarRows = parseAcademicCalendarRowsFromHtml(html).length + parseAcademicCalendarRowsFromText(text).length;
+
+        if (kindHint === "attendance") {
+          return (attendanceRows * 1000) + (timetableRows * 150) + (marksRows * 20) + (unifiedTemplateRows * 10) + tableRows;
+        }
+        if (kindHint === "timetable") {
+          return (unifiedTemplateRows * 600) + (timetableRows * 200) + (calendarRows * 50) + tableRows;
+        }
+        if (kindHint === "marks") {
+          return (marksRows * 300) + (tableRows * 2);
+        }
+        return tableRows + unifiedTemplateRows + timetableRows + marksRows + attendanceRows;
+      };
+
       while (Date.now() - start < settleMs) {
         if (await pageHasCaptchaChallenge(page)) {
           throw new Error(
             "Academia scrape blocked by captcha challenge while loading page. Use scripts/academia_capture_state.js to save a session state and retry."
           );
         }
-        if (await pageHasMfaChallenge(page)) {
+        if (isMfaBlockEnabled() && await pageHasMfaChallenge(page)) {
           throw new Error("Academia scrape requires manual action (MFA/OTP). Complete verification manually, then retry sync.");
         }
 
         await dismissOverlaysBestEffort().catch(() => undefined);
 
         const targets = await collectTargets();
-        // Pick the frame that actually contains the data tables/text.
-        let best = { html: "", text: "", score: 0 };
+        // Pick the frame with the strongest parsing signal for this scrape kind.
+        let best = { html: "", text: "", signalScore: -1, fallbackScore: -1 };
         for (const frame of targets) {
           const html = await frame.content().catch(() => "");
           const text = await frame.evaluate(() => String(document?.body?.innerText || "")).catch(() => "");
-          const score = (html ? html.length : 0) + (text ? text.length * 2 : 0);
-          if (score > best.score) {
-            best = { html, text, score };
+          const signalScore = frameSignalScore(kind, html, text);
+          const fallbackScore = (html ? html.length : 0) + (text ? text.length * 2 : 0);
+          if (signalScore > best.signalScore || (signalScore === best.signalScore && fallbackScore > best.fallbackScore)) {
+            best = { html, text, signalScore, fallbackScore };
           }
         }
         const html = best.html || (await page.content().catch(() => ""));
@@ -1963,12 +3216,32 @@ async function scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword,
             return { html, text };
           }
         } else if (kind === "timetable") {
-          if (parseTimetableRows(html).length > 0 || parseTimetableRowsFromText(text).length > 0) {
+          if (
+            parseTimetableRows(html).length > 0
+            || parseTimetableRowsFromText(text).length > 0
+            || parseUnifiedTimeGridTemplate(html).length > 0
+            || parseAcademicCalendarRowsFromHtml(html).length > 0
+          ) {
             return { html, text };
           }
         } else if (kind === "marks") {
           if (parseMarksRows(html).length > 0 || parseMarksRowsFromText(text).length > 0) {
             return { html, text };
+          }
+          if (!marksNavProbeDone) {
+            marksNavProbeDone = true;
+            await clickOnAnyTarget(
+              targets,
+              [
+                "a[href*='My_Marks']",
+                "a[href*='Marks']",
+                "a:has-text('My Marks')",
+                "a:has-text('Marks')",
+                "button:has-text('My Marks')",
+                "button:has-text('Marks')"
+              ],
+              2500
+            ).catch(() => undefined);
           }
         } else if (parseRowsFromHtmlTables(html).length > 0) {
           return { html, text };
@@ -1983,12 +3256,13 @@ async function scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword,
           "Academia scrape blocked by captcha challenge while loading page. Use scripts/academia_capture_state.js to save a session state and retry."
         );
       }
-      if (await pageHasMfaChallenge(page)) {
+      if (isMfaBlockEnabled() && await pageHasMfaChallenge(page)) {
         throw new Error("Academia scrape requires manual action (MFA/OTP). Complete verification manually, then retry sync.");
       }
       return { html: lastHtml || (await page.content()), text: lastText };
     };
 
+    const pageFetchStartMs = Date.now();
     let lastExtractError = null;
     let bestExtract = {
       attendance: [],
@@ -1996,21 +3270,70 @@ async function scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword,
       attendanceVersion: null,
       timetable: [],
       marks: [],
+      academicCalendar: [],
       score: -1,
-      sourceUrl: null
+      sourceUrl: null,
+      batchNumber: null
     };
+    let bestUnifiedTemplateRows = [];
+    let bestCalendarRows = [];
+    const templateCandidates = [];
+    const dynamicTimetableCandidateUrls = [...timetableCandidateUrls];
+    const seenDynamicTimetableUrls = new Set(dynamicTimetableCandidateUrls);
+    const dynamicMarksCandidateUrls = [...marksCandidateUrls];
+    const seenDynamicMarksUrls = new Set(dynamicMarksCandidateUrls);
+    const enqueueTimetableCandidates = (html, text) => {
+      const discovered = discoverTimetableHashUrls({ html, text, baseUrl });
+      for (const candidate of discovered) {
+        if (seenDynamicTimetableUrls.has(candidate)) continue;
+        seenDynamicTimetableUrls.add(candidate);
+        dynamicTimetableCandidateUrls.push(candidate);
+      }
+    };
+    const enqueueMarksCandidates = (html, text) => {
+      const discovered = discoverMarksHashUrls({ html, text, baseUrl });
+      for (const candidate of discovered) {
+        if (seenDynamicMarksUrls.has(candidate)) continue;
+        seenDynamicMarksUrls.add(candidate);
+        dynamicMarksCandidateUrls.push(candidate);
+      }
+    };
+
+    const seedHtml = await page.content().catch(() => "");
+    const seedText = await page.evaluate(() => String(document?.body?.innerText || "")).catch(() => "");
+    enqueueTimetableCandidates(seedHtml, seedText);
+    enqueueMarksCandidates(seedHtml, seedText);
 
     for (const candidateUrl of attendanceCandidateUrls) {
       try {
         const raw = await gotoAndExtract(candidateUrl, "attendance");
+        enqueueTimetableCandidates(raw.html, raw.text);
+        enqueueMarksCandidates(raw.html, raw.text);
         const attendanceParsed = parseAndNormalizeAttendance({ html: raw.html, text: raw.text });
         const timetableFromHtml = parseTimetableRows(raw.html);
         const timetableFromText = parseTimetableRowsFromText(raw.text);
+        const unifiedTemplate = parseUnifiedTimeGridTemplate(raw.html);
+        const calendarFromHtml = parseAcademicCalendarRowsFromHtml(raw.html);
+        const calendarFromText = parseAcademicCalendarRowsFromText(raw.text);
+        const calendarRows = dedupeAcademicCalendarRows([...calendarFromHtml, ...calendarFromText]);
         const marksFromHtml = parseMarksRows(raw.html);
         const marksFromText = parseMarksRowsFromText(raw.text);
 
         const timetable = timetableFromHtml.length ? timetableFromHtml : timetableFromText;
-        const marks = marksFromHtml.length ? marksFromHtml : marksFromText;
+        if (unifiedTemplate.length > bestUnifiedTemplateRows.length) {
+          bestUnifiedTemplateRows = unifiedTemplate;
+        }
+        if (unifiedTemplate.length > 0) {
+          templateCandidates.push({
+            rows: unifiedTemplate,
+            url: candidateUrl,
+            batchNumber: extractBatchNumber(`${candidateUrl} ${raw.text || ""}`)
+          });
+        }
+        if (calendarRows.length > bestCalendarRows.length) {
+          bestCalendarRows = calendarRows;
+        }
+        const marks = dedupeMarksRows([...(marksFromHtml || []), ...(marksFromText || [])]);
         const attendance = attendanceParsed.attendance || [];
         const score = (attendance.length * 1000) + (timetable.length * 100) + marks.length;
         if (debug) {
@@ -2018,23 +3341,37 @@ async function scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword,
             url: candidateUrl,
             attendanceRows: attendance.length,
             timetableRows: timetable.length,
-            marksRows: marks.length
+            marksRows: marks.length,
+            marksFromHtml: marksFromHtml.length,
+            marksFromText: marksFromText.length,
+            marksSample: marks.slice(0, 4).map((row) => ({
+              subjectName: row?.subjectName || row?.subject_name || null,
+              componentName: row?.componentName || row?.component_name || null,
+              score: row?.score ?? null,
+              maxScore: row?.maxScore ?? row?.max_score ?? null
+            }))
           });
         }
 
         if (score > bestExtract.score) {
+          const candidateBatchNumber = extractBatchNumber(`${candidateUrl} ${raw.text || ""}`);
           bestExtract = {
             attendance,
             attendanceDaily: attendanceParsed.dailyEntries || [],
             attendanceVersion: attendanceParsed.version || null,
             timetable,
             marks,
+            academicCalendar: calendarRows,
             score,
-            sourceUrl: candidateUrl
+            sourceUrl: candidateUrl,
+            batchNumber: Number.isFinite(candidateBatchNumber) ? candidateBatchNumber : null
           };
         }
 
-        if (attendance.length > 0 && timetable.length > 0) {
+        const hasRequiredAttendance = !needsAttendance || attendance.length > 0;
+        const hasRequiredTimetable = !needsTimetable || timetable.length > 0;
+        const hasUsefulMarks = !needsMarks || marks.length > 0 || mode === "marks_attendance";
+        if (hasRequiredAttendance && hasRequiredTimetable && hasUsefulMarks) {
           break;
         }
       } catch (error) {
@@ -2047,12 +3384,32 @@ async function scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword,
     }
 
     let bestTimetableRows = [...(bestExtract.timetable || [])];
-    for (const candidateUrl of timetableCandidateUrls) {
+    for (let idx = 0; idx < dynamicTimetableCandidateUrls.length; idx += 1) {
+      const candidateUrl = dynamicTimetableCandidateUrls[idx];
       try {
         const raw = await gotoAndExtract(candidateUrl, "timetable");
+        enqueueTimetableCandidates(raw.html, raw.text);
+        enqueueMarksCandidates(raw.html, raw.text);
         const timetableFromHtml = parseTimetableRows(raw.html);
         const timetableFromText = parseTimetableRowsFromText(raw.text);
+        const unifiedTemplate = parseUnifiedTimeGridTemplate(raw.html);
+        const calendarFromHtml = parseAcademicCalendarRowsFromHtml(raw.html);
+        const calendarFromText = parseAcademicCalendarRowsFromText(raw.text);
+        const calendarRows = dedupeAcademicCalendarRows([...calendarFromHtml, ...calendarFromText]);
         const candidateRows = timetableFromHtml.length ? timetableFromHtml : timetableFromText;
+        if (unifiedTemplate.length > bestUnifiedTemplateRows.length) {
+          bestUnifiedTemplateRows = unifiedTemplate;
+        }
+        if (unifiedTemplate.length > 0) {
+          templateCandidates.push({
+            rows: unifiedTemplate,
+            url: candidateUrl,
+            batchNumber: extractBatchNumber(`${candidateUrl} ${raw.text || ""}`)
+          });
+        }
+        if (calendarRows.length > bestCalendarRows.length) {
+          bestCalendarRows = calendarRows;
+        }
         if (debug) {
           const dayCountDebug = new Set(
             candidateRows.map((row) => Number(row.dayOrder)).filter((day) => Number.isFinite(day) && day >= 1 && day <= 7)
@@ -2060,7 +3417,9 @@ async function scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword,
           console.log("[academia-scrape-debug] timetable candidate", {
             url: candidateUrl,
             rows: candidateRows.length,
-            dayOrders: dayCountDebug
+            dayOrders: dayCountDebug,
+            unifiedTemplateRows: unifiedTemplate.length,
+            calendarRows: calendarRows.length
           });
         }
         if (candidateRows.length > bestTimetableRows.length) {
@@ -2082,16 +3441,32 @@ async function scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword,
     }
 
     let bestMarksRows = [...(bestExtract.marks || [])];
-    for (const candidateUrl of marksCandidateUrls) {
+    const marksSubjectsFound = new Set(
+      (bestMarksRows || [])
+        .map((row) => cleanText(row?.subjectName || row?.subject_name || "").toLowerCase())
+        .filter(Boolean)
+    ).size;
+    const shouldProbeMarksPage = mode === "marks_attendance"
+      ? marksSubjectsFound < 3
+      : true;
+    for (let idx = 0; idx < (shouldProbeMarksPage ? dynamicMarksCandidateUrls.length : 0); idx += 1) {
+      const candidateUrl = dynamicMarksCandidateUrls[idx];
       try {
         const raw = await gotoAndExtract(candidateUrl, "marks");
+        enqueueMarksCandidates(raw.html, raw.text);
         const marksFromHtml = parseMarksRows(raw.html);
         const marksFromText = parseMarksRowsFromText(raw.text);
-        const candidateRows = marksFromHtml.length ? marksFromHtml : marksFromText;
+        const candidateRows = dedupeMarksRows([...(marksFromHtml || []), ...(marksFromText || [])]);
         if (debug) {
+          const discoveredMarkRoutes = discoverMarksHashUrls({ html: raw.html, text: raw.text, baseUrl });
+          const textPreview = String(raw.text || "").replace(/\s+/g, " ").trim().slice(0, 220);
           console.log("[academia-scrape-debug] marks candidate", {
             url: candidateUrl,
-            rows: candidateRows.length
+            rows: candidateRows.length,
+            marksFromHtml: marksFromHtml.length,
+            marksFromText: marksFromText.length,
+            discoveredMarkRoutes: discoveredMarkRoutes.slice(0, 5),
+            textPreview
           });
         }
         if (candidateRows.length > bestMarksRows.length) {
@@ -2113,25 +3488,132 @@ async function scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword,
       throw lastExtractError;
     }
 
-    const jsonAttendance = parseAttendanceRowsFromJsonPayloads(jsonPayloads);
-    const jsonTimetable = parseTimetableRowsFromJsonPayloads(jsonPayloads);
-    const jsonMarks = parseMarksRowsFromJsonPayloads(jsonPayloads, [...bestTimetableRows, ...jsonTimetable]);
-    const mergedAttendance = normalizeAttendanceRows([...(bestExtract.attendance || []), ...jsonAttendance]);
+    pageFetchMs = Date.now() - pageFetchStartMs;
+    const parseStartMs = Date.now();
+    const jsonAttendance = needsAttendance ? parseAttendanceRowsFromJsonPayloads(jsonPayloads) : [];
+    const jsonTimetable = needsTimetable ? parseTimetableRowsFromJsonPayloads(jsonPayloads) : [];
+    const jsonMarks = needsMarks
+      ? parseMarksRowsFromJsonPayloads(jsonPayloads, [...bestTimetableRows, ...jsonTimetable])
+      : [];
+    const mergedAttendance = needsAttendance
+      ? normalizeAttendanceRows([...(bestExtract.attendance || []), ...jsonAttendance])
+      : [];
     const mergedDaily = normalizeDailyEntries(bestExtract.attendanceDaily || []);
-    const mergedTimetable = dedupeTimetableRows([...bestTimetableRows, ...jsonTimetable]);
-    const mergedMarks = dedupeMarksRows([...bestMarksRows, ...jsonMarks]);
+    const preferredBatchRaw = Number(process.env.ACADEMIA_UNIFIED_BATCH_PREFERENCE || "");
+    const preferredBatch = Number.isFinite(preferredBatchRaw) && preferredBatchRaw > 0 ? Math.round(preferredBatchRaw) : null;
+    const uniqueTemplateCandidates = [];
+    const seenTemplateFingerprint = new Set();
+    for (const candidate of templateCandidates) {
+      const fingerprint = createHash("sha1")
+        .update(JSON.stringify((candidate.rows || []).map((r) => [r.dayOrder, r.slotToken, r.startTime, r.endTime])))
+        .digest("hex");
+      if (seenTemplateFingerprint.has(fingerprint)) continue;
+      seenTemplateFingerprint.add(fingerprint);
+      uniqueTemplateCandidates.push(candidate);
+    }
+
+    const evaluateTemplateScore = (rows) => {
+      if (!Array.isArray(rows) || rows.length === 0) return -1;
+      const mappedPrimary = hydrateTimetableWithUnifiedTemplate(bestTimetableRows, rows);
+      const mappedSecondary = hydrateTimetableWithUnifiedTemplate(jsonTimetable, rows);
+      const merged = [...mappedPrimary, ...mappedSecondary];
+      const mappedWithDay = merged.filter((row) => {
+        const day = Number(row?.dayOrder ?? row?.day_order);
+        return Number.isFinite(day) && day >= 1 && day <= 7;
+      }).length;
+      const uniqueDays = new Set(
+        merged
+          .map((row) => Number(row?.dayOrder ?? row?.day_order))
+          .filter((day) => Number.isFinite(day) && day >= 1 && day <= 7)
+      ).size;
+      return (mappedWithDay * 100) + (uniqueDays * 10);
+    };
+
+    let selectedTemplateRows = bestUnifiedTemplateRows;
+    let selectedTemplateMeta = null;
+    if (uniqueTemplateCandidates.length > 0) {
+      let ranked = uniqueTemplateCandidates.map((candidate) => ({
+        ...candidate,
+        score: evaluateTemplateScore(candidate.rows)
+      }));
+      if (preferredBatch !== null) {
+        const preferred = ranked.filter((candidate) => candidate.batchNumber === preferredBatch);
+        if (preferred.length > 0) {
+          ranked = preferred;
+        }
+      }
+      ranked.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        const aBatch = Number.isFinite(a.batchNumber) ? Number(a.batchNumber) : -1;
+        const bBatch = Number.isFinite(b.batchNumber) ? Number(b.batchNumber) : -1;
+        if (bBatch !== aBatch) return bBatch - aBatch;
+        return String(a.url || "").localeCompare(String(b.url || ""));
+      });
+      selectedTemplateMeta = ranked[0] || null;
+      selectedTemplateRows = selectedTemplateMeta?.rows || bestUnifiedTemplateRows;
+    }
+
+    const mappedTimetableRows = needsTimetable ? hydrateTimetableWithUnifiedTemplate(bestTimetableRows, selectedTemplateRows) : [];
+    const mappedJsonTimetableRows = needsTimetable ? hydrateTimetableWithUnifiedTemplate(jsonTimetable, selectedTemplateRows) : [];
+    const hasTemplateMapping = selectedTemplateRows.length > 0 && (mappedTimetableRows.length > 0 || mappedJsonTimetableRows.length > 0);
+    const rawTimetableRows = hasTemplateMapping
+      ? [...bestTimetableRows, ...jsonTimetable].filter((row) => {
+          const day = Number(row?.dayOrder ?? row?.day_order);
+          return Number.isFinite(day) && day >= 1 && day <= 7;
+        })
+      : [...bestTimetableRows, ...jsonTimetable];
+    const mergedTimetable = needsTimetable
+      ? (() => {
+          const deduped = dedupeTimetableRows([...mappedTimetableRows, ...mappedJsonTimetableRows, ...rawTimetableRows]);
+          if (!hasTemplateMapping) {
+            return deduped;
+          }
+          const normalizeSubject = (value) => String(value || "").trim().toLowerCase();
+          const scheduledSubjects = new Set(
+            deduped
+              .filter((row) => {
+                const day = Number(row?.dayOrder ?? row?.day_order);
+                const hasTime = Boolean(row?.startTime || row?.start_time || row?.endTime || row?.end_time);
+                return Number.isFinite(day) && day >= 1 && day <= 7 && hasTime;
+              })
+              .map((row) => normalizeSubject(row?.subjectName ?? row?.subject_name))
+              .filter(Boolean)
+          );
+          return deduped.filter((row) => {
+            const subjectKey = normalizeSubject(row?.subjectName ?? row?.subject_name);
+            if (!subjectKey || !scheduledSubjects.has(subjectKey)) {
+              return true;
+            }
+            const day = Number(row?.dayOrder ?? row?.day_order);
+            const hasTime = Boolean(row?.startTime || row?.start_time || row?.endTime || row?.end_time);
+            return Number.isFinite(day) && day >= 1 && day <= 7 && hasTime;
+          });
+        })()
+      : [];
+    const mergedMarks = needsMarks ? dedupeMarksRows([...bestMarksRows, ...jsonMarks]) : [];
+    const mergedAcademicCalendar = dedupeAcademicCalendarRows([...(bestExtract.academicCalendar || []), ...bestCalendarRows]);
 
     const result = {
       // Attendance page is the most stable source; we also try alternate SRM pages + JSON payloads.
       timetable: mergedTimetable,
       marks: mergedMarks,
       attendance: mergedAttendance,
+      academicCalendar: mergedAcademicCalendar,
       attendanceDaily: mergedDaily,
       attendanceVersion: computeAttendanceVersion(mergedAttendance),
-      sourceUrl: bestExtract.sourceUrl
+      sourceUrl: bestExtract.sourceUrl || selectedTemplateMeta?.url || null,
+      batchNumber: Number.isFinite(selectedTemplateMeta?.batchNumber)
+        ? Math.round(selectedTemplateMeta.batchNumber)
+        : (Number.isFinite(bestExtract.batchNumber) ? Math.round(bestExtract.batchNumber) : null),
+      timings: {
+        loginMs,
+        pageFetchMs,
+        parseMs: Date.now() - parseStartMs,
+        totalMs: Date.now() - totalStartMs
+      }
     };
 
-    if (!result.attendance.length && !result.timetable.length && !result.marks.length) {
+    if (!result.attendance.length && !result.timetable.length && !result.marks.length && !result.academicCalendar.length) {
       // Include a hint for the most common cause: data is rendered inside a nested iframe/div grid.
       const bodyText = String(await page.textContent("body").catch(() => "")).toLowerCase();
       if (bodyText.includes("upgrade to creator") || bodyText.includes("creator 5")) {
@@ -2147,9 +3629,21 @@ async function scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword,
   }
 }
 
-async function scrapeAcademiaData({ collegeEmail, collegePassword, storageStatePath = null, storageState = null }) {
+async function scrapeAcademiaData({
+  collegeEmail,
+  collegePassword,
+  storageStatePath = null,
+  storageState = null,
+  scrapeMode = "full"
+}) {
   const mode = String(process.env.ACADEMIA_SCRAPE_MODE || "").toLowerCase();
-  const attempts = Math.max(1, Number(process.env.ACADEMIA_RETRY_ATTEMPTS || 3));
+  const normalizedScrapeMode = String(scrapeMode || "full").toLowerCase();
+  const attemptsRaw = normalizedScrapeMode === "marks_attendance"
+    ? (process.env.ACADEMIA_RETRY_ATTEMPTS_FAST || 2)
+    : normalizedScrapeMode === "reports"
+      ? (process.env.ACADEMIA_RETRY_ATTEMPTS_REPORTS || 2)
+      : (process.env.ACADEMIA_RETRY_ATTEMPTS || 3);
+  const attempts = Math.max(1, Number(attemptsRaw || 1));
   const backoffMs = Math.max(300, Number(process.env.ACADEMIA_RETRY_BACKOFF_MS || 1200));
   const usesHashPages =
     String(process.env.ACADEMIA_TIMETABLE_URL || "").includes("#Page:")
@@ -2159,7 +3653,13 @@ async function scrapeAcademiaData({ collegeEmail, collegePassword, storageStateP
   if (mode === "playwright" || usesHashPages) {
     try {
       return await withRetry(
-        () => scrapeAcademiaDataWithPlaywright({ collegeEmail, collegePassword, storageStatePath, storageState }),
+        () => scrapeAcademiaDataWithPlaywright({
+          collegeEmail,
+          collegePassword,
+          storageStatePath,
+          storageState,
+          scrapeMode: normalizedScrapeMode
+        }),
         { attempts, backoffMs }
       );
     } catch (error) {
@@ -2169,7 +3669,15 @@ async function scrapeAcademiaData({ collegeEmail, collegePassword, storageStateP
       }
 
       const playwrightMsg = String(error?.message || "").toLowerCase();
-      if (playwrightMsg.includes("no readable rows") || playwrightMsg.includes("content blocked by an overlay") || playwrightMsg.includes("try one-time login")) {
+      if (
+        playwrightMsg.includes("no readable rows")
+        || playwrightMsg.includes("content blocked by an overlay")
+        || playwrightMsg.includes("try one-time login")
+        || playwrightMsg.includes("maximum concurrent sessions")
+        || playwrightMsg.includes("concurrent active sessions")
+        || playwrightMsg.includes("session limit")
+        || playwrightMsg.includes("block-sessions")
+      ) {
         // HTTP fallback won't help when the SPA rendered but our selectors/parsers couldn't extract rows.
         const detail = String(error?.message || "unknown playwright error");
         throw new Error(`Academia scraping failed after ${attempts} attempts (playwright): ${detail}`);
@@ -2177,7 +3685,7 @@ async function scrapeAcademiaData({ collegeEmail, collegePassword, storageStateP
 
       try {
         return await withRetry(
-          () => scrapeAcademiaDataWithHttp({ collegeEmail, collegePassword }),
+          () => scrapeAcademiaDataWithHttp({ collegeEmail, collegePassword, scrapeMode: normalizedScrapeMode }),
           { attempts, backoffMs }
         );
       } catch (httpError) {
@@ -2192,7 +3700,7 @@ async function scrapeAcademiaData({ collegeEmail, collegePassword, storageStateP
 
   try {
     return await withRetry(
-      () => scrapeAcademiaDataWithHttp({ collegeEmail, collegePassword }),
+      () => scrapeAcademiaDataWithHttp({ collegeEmail, collegePassword, scrapeMode: normalizedScrapeMode }),
       { attempts, backoffMs }
     );
   } catch (error) {
@@ -2256,17 +3764,17 @@ async function captureAcademiaStorageState({ collegeEmail, collegePassword, outp
 
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-      if (await pageHasSessionLimitExceeded(page)) {
+      const targetsNow = await resolveZohoLoginTargets(page);
+      if (await anyTargetHasSessionLimitExceeded(targetsNow)) {
         const resolved = await maybeResolveSessionLimitExceeded(page);
         if (!resolved) {
           throw new Error(
-            "Session limit exceeded. Sign out of SRM/Zoho elsewhere or enable ACADEMIA_TERMINATE_SESSIONS_ON_LIMIT=true and retry."
+            "Session limit exceeded. Sign out of SRM/Zoho elsewhere and retry."
           );
         }
         await page.waitForTimeout(2500);
       }
 
-      const targetsNow = await resolveZohoLoginTargets(page);
       if (await anyTargetHasInvalidCredentials(targetsNow)) {
         throw new Error("Academia login failed: invalid college credentials");
       }
@@ -2302,6 +3810,10 @@ module.exports = {
   __debug: {
     parseTimetableRows,
     parseTimetableRowsFromText,
+    parseAcademicCalendarRowsFromHtml,
+    parseAcademicCalendarRowsFromText,
+    parseUnifiedTimeGridTemplate,
+    hydrateTimetableWithUnifiedTemplate,
     parseMarksRows,
     parseMarksRowsFromText,
     parseAttendanceRows,

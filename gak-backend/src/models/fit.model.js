@@ -1,4 +1,5 @@
 const pool = require("../config/db");
+const { createId } = require("../utils/id.util");
 
 async function upsertDailyFitMetrics({ userId, metricDate, steps = null, calories = null, heartRateAvg = null }) {
   try {
@@ -59,8 +60,83 @@ async function listFitMetricsRange(userId, fromDate) {
   }
 }
 
+async function getLatestBodyMetric(userId) {
+  try {
+    const [rows] = await pool.execute(
+      `SELECT metric_id, user_id, height, weight, body_fat_percentage, recorded_timestamp
+       FROM body_metric
+       WHERE user_id = ?
+       ORDER BY recorded_timestamp DESC
+       LIMIT 1`,
+      [userId]
+    );
+    return rows[0] || null;
+  } catch (error) {
+    if (error && error.code === "ER_NO_SUCH_TABLE") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function upsertLatestBodyMetric({ userId, height = null, weight = null, bodyFatPercentage = null }) {
+  const normalizePositive = (value) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
+  const incomingHeight = normalizePositive(height);
+  const incomingWeight = normalizePositive(weight);
+  const incomingBodyFat = bodyFatPercentage === null || bodyFatPercentage === undefined
+    ? null
+    : normalizePositive(bodyFatPercentage);
+  const existing = await getLatestBodyMetric(userId);
+
+  const finalHeight = incomingHeight ?? normalizePositive(existing?.height);
+  const finalWeight = incomingWeight ?? normalizePositive(existing?.weight);
+  const finalBodyFat = incomingBodyFat ?? normalizePositive(existing?.body_fat_percentage);
+
+  if (finalHeight === null && finalWeight === null && finalBodyFat === null) {
+    return { inserted: false, metric: existing || null };
+  }
+
+  const nearlyEqual = (a, b) => {
+    if (a === null && b === null) return true;
+    if (a === null || b === null) return false;
+    return Math.abs(Number(a) - Number(b)) < 0.0001;
+  };
+
+  if (
+    existing
+    && nearlyEqual(finalHeight, normalizePositive(existing.height))
+    && nearlyEqual(finalWeight, normalizePositive(existing.weight))
+    && nearlyEqual(finalBodyFat, normalizePositive(existing.body_fat_percentage))
+  ) {
+    return { inserted: false, metric: existing };
+  }
+
+  try {
+    const metricId = createId("bm");
+    await pool.execute(
+      `INSERT INTO body_metric
+        (metric_id, user_id, height, weight, body_fat_percentage)
+       VALUES (?, ?, ?, ?, ?)`,
+      [metricId, userId, finalHeight, finalWeight, finalBodyFat]
+    );
+    const latest = await getLatestBodyMetric(userId);
+    return { inserted: true, metric: latest || null };
+  } catch (error) {
+    if (error && error.code === "ER_NO_SUCH_TABLE") {
+      return { inserted: false, metric: existing || null };
+    }
+    throw error;
+  }
+}
+
 module.exports = {
   upsertDailyFitMetrics,
   getDailyFitMetrics,
-  listFitMetricsRange
+  listFitMetricsRange,
+  getLatestBodyMetric,
+  upsertLatestBodyMetric
 };

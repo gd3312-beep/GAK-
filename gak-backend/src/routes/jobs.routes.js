@@ -27,7 +27,12 @@ router.use((req, res, next) => {
 router.post("/token-refresh", jobsController.runTokenRefresh);
 router.post("/gmail-sync", jobsController.runGmailSync);
 router.post("/calendar-sync", jobsController.runCalendarSync);
+router.post("/fitness-sync", jobsController.runFitnessSync);
 router.post("/metrics-recompute", jobsController.runMetrics);
+router.post("/academic-cleanup", jobsController.runAcademicCleanup);
+router.post("/oauth-nonce-cleanup", jobsController.runOAuthNonceCleanup);
+router.post("/academia/marks-attendance-sync", jobsController.runAcademiaMarksAttendanceSync);
+router.post("/academia/reports-sync", jobsController.runAcademiaReportsSync);
 router.post("/run-all", jobsController.runAll);
 
 module.exports = router;

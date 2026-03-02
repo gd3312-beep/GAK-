@@ -84,6 +84,7 @@ CREATE TABLE app_user (
   full_name VARCHAR(255),
   email VARCHAR(255),
   password_hash VARCHAR(255),
+  profile_image_url TEXT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 

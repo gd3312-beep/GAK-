@@ -22,5 +22,8 @@ router.post("/academia/sync", integrationController.syncAcademia);
 router.post("/academia/sync-reports", integrationController.syncAcademiaReports);
 router.get("/academia/status", integrationController.getAcademiaStatus);
 router.get("/academia/data", integrationController.getAcademiaData);
+router.get("/academic-sources", integrationController.listAcademicSources);
+router.post("/academic-sources/register", integrationController.registerAcademicSource);
+router.delete("/academic-sources/:enrollmentId", integrationController.removeAcademicSource);
 
 module.exports = router;

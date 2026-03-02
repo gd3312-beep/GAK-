@@ -1,8 +1,7 @@
-const { randomUUID } = require("crypto");
-
 const foodModel = require("../models/food.model");
 const analyticsService = require("../services/analytics.service");
 const behaviorService = require("../services/behavior.service");
+const { createId } = require("../utils/id.util");
 
 function ensureSelf(req, res, paramName = "userId") {
   const paramValue = req.params?.[paramName];
@@ -112,7 +111,7 @@ async function uploadFoodImage(req, res, next) {
       return res.status(400).json({ message: "imageUrl is required" });
     }
 
-    const imageId = randomUUID();
+    const imageId = createId("img");
     await foodModel.createFoodImage({
       imageId,
       userId: req.user.userId,
@@ -123,7 +122,7 @@ async function uploadFoodImage(req, res, next) {
 
     if (foodName) {
       detected = await foodModel.createDetectedFood({
-        detectedId: randomUUID(),
+        detectedId: createId("dfi"),
         imageId,
         foodName,
         confidenceScore: 0.9
@@ -150,7 +149,7 @@ async function confirmFood(req, res, next) {
       return res.status(400).json({ message: "Invalid detected_id: detected item does not exist for user" });
     }
 
-    const confirmedId = randomUUID();
+    const confirmedId = createId("cfi");
 
     await foodModel.confirmFoodItem({
       confirmedId,
@@ -272,7 +271,7 @@ async function logManualMeal(req, res, next) {
     const logDate = isIsoDate(date) ? date : null;
     const uploadedAt = logDate ? `${logDate} 12:00:00` : null;
 
-    const imageId = randomUUID();
+    const imageId = createId("img");
     await foodModel.createFoodImage({
       imageId,
       userId: req.user.userId,
@@ -294,7 +293,7 @@ async function logManualMeal(req, res, next) {
       const carbs = Number(raw?.carbs ?? 0);
       const fats = Number(raw?.fats ?? 0);
 
-      const detectedId = randomUUID();
+      const detectedId = createId("dfi");
       await foodModel.createDetectedFood({
         detectedId,
         imageId,
@@ -302,7 +301,7 @@ async function logManualMeal(req, res, next) {
         confidenceScore: 1
       });
 
-      const confirmedId = randomUUID();
+      const confirmedId = createId("cfi");
       await foodModel.confirmFoodItem({
         confirmedId,
         detectedId,

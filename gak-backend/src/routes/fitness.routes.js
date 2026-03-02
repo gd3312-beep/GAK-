@@ -19,5 +19,6 @@ router.patch("/workout/action", fitnessController.updateWorkoutAction);
 router.get("/summary/:userId", fitnessController.getFitnessSummary);
 router.get("/fit/daily", fitnessController.getFitDaily);
 router.get("/fit/range", fitnessController.getFitRange);
+router.get("/fit/activities", fitnessController.getFitActivities);
 
 module.exports = router;

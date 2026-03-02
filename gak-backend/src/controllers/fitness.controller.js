@@ -1,4 +1,3 @@
-const { randomUUID } = require("crypto");
 const path = require("path");
 const fs = require("fs/promises");
 let pdfParse = null;
@@ -14,6 +13,7 @@ const analyticsService = require("../services/analytics.service");
 const behaviorService = require("../services/behavior.service");
 const integrationService = require("../services/integration.service");
 const { parseWorkoutPlanPdf } = require("../utils/workout-plan.util");
+const { createId } = require("../utils/id.util");
 
 function ensureSelf(req, res, paramName = "userId") {
   const paramValue = req.params?.[paramName];
@@ -36,7 +36,7 @@ async function createWorkoutSession(req, res, next) {
       return res.status(400).json({ message: "workoutDate, workoutType, muscleGroup are required" });
     }
 
-    const sessionId = randomUUID();
+    const sessionId = createId("ws");
 
     const session = await workoutModel.createWorkoutSession({
       sessionId,
@@ -76,7 +76,7 @@ async function updateWorkoutAction(req, res, next) {
     }
 
     const actionId = await workoutModel.upsertWorkoutAction({
-      actionId: randomUUID(),
+      actionId: createId("wa"),
       sessionId,
       userId: req.user.userId,
       status
@@ -105,7 +105,19 @@ async function getFitnessSummary(req, res, next) {
   try {
     const { userId } = req.params;
     if (!ensureSelf(req, res, "userId")) return;
+    const refreshRaw = String(req.query.refresh || "").toLowerCase();
+    const refresh = ["1", "true", "yes", "force"].includes(refreshRaw);
+
+    if (refresh) {
+      // Explicit refresh path used by Karma page open: fetch latest body metrics before reading summary.
+      await integrationService.syncGoogleFitBodyMetrics(userId).catch(() => null);
+    }
+
     const summary = await analyticsService.getFitnessSummary(userId);
+    if (!refresh && summary && (summary.height === null || summary.weight === null)) {
+      // Keep default summary endpoint fast: background refresh only.
+      void integrationService.syncGoogleFitBodyMetrics(userId).catch(() => null);
+    }
     return res.status(200).json(summary);
   } catch (error) {
     return next(error);
@@ -116,7 +128,16 @@ async function getFitDaily(req, res, next) {
   try {
     const requestDate = req.query.date || new Date().toISOString().slice(0, 10);
     const date = isIsoDate(requestDate) ? requestDate : new Date().toISOString().slice(0, 10);
-    const result = await integrationService.getFitDailyMetrics(req.user.userId, date);
+    const refreshRaw = String(req.query.refresh || "").toLowerCase();
+    const refresh = ["1", "true", "yes", "force"].includes(refreshRaw);
+    let result;
+    if (refresh) {
+      result = await integrationService.syncGoogleFitDailyMetrics(req.user.userId, date).catch(async () => (
+        integrationService.getFitDailyMetrics(req.user.userId, date)
+      ));
+    } else {
+      result = await integrationService.getFitDailyMetrics(req.user.userId, date);
+    }
     return res.status(200).json(result);
   } catch (error) {
     return next(error);
@@ -131,6 +152,29 @@ async function getFitRange(req, res, next) {
     }
     const rows = await integrationService.listFitMetricsRange(req.user.userId, from);
     return res.status(200).json({ from: String(from).slice(0, 10), rows });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function getFitActivities(req, res, next) {
+  try {
+    const from = req.query.from;
+    const to = req.query.to || new Date().toISOString().slice(0, 10);
+    const limitRaw = Number(req.query.limit || 20);
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(100, Math.trunc(limitRaw))) : 20;
+    if (!from || !isIsoDate(from)) {
+      return res.status(400).json({ message: "from (YYYY-MM-DD) is required" });
+    }
+    if (!isIsoDate(to)) {
+      return res.status(400).json({ message: "to (YYYY-MM-DD) must be valid when provided" });
+    }
+    const payload = await integrationService.listGoogleFitActivities(req.user.userId, {
+      fromDate: from,
+      toDate: to,
+      limit
+    });
+    return res.status(200).json(payload);
   } catch (error) {
     return next(error);
   }
@@ -156,6 +200,16 @@ function diffMinutes(startTime, endTime) {
   return Math.max(1, end - start);
 }
 
+function estimateWorkoutCalories({ explicitCalories, durationMinutes }) {
+  const explicit = Number(explicitCalories || 0);
+  if (Number.isFinite(explicit) && explicit > 0) {
+    return Math.round(explicit);
+  }
+  const duration = Math.max(20, Number(durationMinutes || 60));
+  // Conservative fallback so workout logs contribute to daily energy even when PDF estimate is missing.
+  return Math.max(120, Math.round(duration * 6));
+}
+
 function dayLabelMatchesDate(label, dateObj) {
   const raw = String(label || "").toLowerCase().trim();
   if (!raw) {
@@ -179,26 +233,34 @@ function dayLabelMatchesDate(label, dateObj) {
     return true;
   }
 
-  const dayOrderMatch = raw.match(/\bday\s*([1-7])\b/i);
+  const dayOrderMatch = raw.match(/\b(?:day|day\s*order|d)\s*[-: ]?([1-7])\b/i);
   if (dayOrderMatch && Number(dayOrderMatch[1]) === mondayOrder) {
-    return true;
-  }
-
-  const standaloneNumber = raw.match(/\b([1-7])\b/);
-  if (standaloneNumber && Number(standaloneNumber[1]) === mondayOrder) {
     return true;
   }
 
   return false;
 }
 
+function isCalendarDayLabel(label) {
+  const raw = String(label || "").toLowerCase().trim();
+  if (!raw) return false;
+  if (/\bmon(day)?|tue(s|sday)?|wed(nesday)?|thu(r|rs|rsday)?|fri(day)?|sat(urday)?|sun(day)?\b/i.test(raw)) {
+    return true;
+  }
+  if (/\b(?:day|day\s*order|d)\s*[-: ]?[1-7]\b/i.test(raw)) {
+    return true;
+  }
+  return false;
+}
+
 function filterExercisesForDate(exercises, dateObj) {
   const list = Array.isArray(exercises) ? exercises : [];
   const hasDayLabels = list.some((item) => String(item?.day_label || "").trim().length > 0);
+  const hasCalendarLabels = list.some((item) => isCalendarDayLabel(item?.day_label));
 
-  if (!hasDayLabels) {
+  if (!hasDayLabels || !hasCalendarLabels) {
     return {
-      hasDayLabels: false,
+      hasDayLabels: hasCalendarLabels,
       isScheduledForDay: list.length > 0,
       exercisesForDay: list
     };
@@ -222,7 +284,7 @@ async function uploadWorkoutPlan(req, res, next) {
       return res.status(400).json({ message: "pdf-parse is not installed on backend" });
     }
 
-    const planId = randomUUID();
+    const planId = createId("wp");
     const userId = req.user.userId;
     const original = String(req.file.originalname || "workout-plan.pdf");
 
@@ -247,7 +309,12 @@ async function uploadWorkoutPlan(req, res, next) {
         planName: parsed.planName || null,
         startTime: parsed.startTime || null,
         endTime: parsed.endTime || null,
-        filePath
+        filePath,
+        estimatedCaloriesBurned: parsed.estimatedCaloriesBurned ?? null,
+        preWorkoutMealTime: parsed.preWorkoutMealTime || null,
+        preWorkoutMealText: parsed.preWorkoutMealText || null,
+        postWorkoutMealTime: parsed.postWorkoutMealTime || null,
+        postWorkoutMealText: parsed.postWorkoutMealText || null
       });
     } catch (dbError) {
       // Likely missing migration columns/tables.
@@ -258,8 +325,8 @@ async function uploadWorkoutPlan(req, res, next) {
     }
 
     const exercises = (parsed.exercises || []).map((ex, idx) => ({
-      exerciseId: randomUUID(),
-      dayLabel: null,
+      exerciseId: createId("wpe"),
+      dayLabel: ex.dayLabel || null,
       sortOrder: ex.sortOrder === undefined || ex.sortOrder === null ? idx : Number(ex.sortOrder),
       exerciseName: ex.exerciseName,
       sets: ex.sets === undefined ? null : ex.sets,
@@ -280,6 +347,11 @@ async function uploadWorkoutPlan(req, res, next) {
       planName: parsed.planName || null,
       startTime: parsed.startTime || null,
       endTime: parsed.endTime || null,
+      estimatedCaloriesBurned: parsed.estimatedCaloriesBurned ?? null,
+      preWorkoutMealTime: parsed.preWorkoutMealTime || null,
+      preWorkoutMealText: parsed.preWorkoutMealText || null,
+      postWorkoutMealTime: parsed.postWorkoutMealTime || null,
+      postWorkoutMealText: parsed.postWorkoutMealText || null,
       exerciseCount: exercises.length,
       preview: exercises.slice(0, 12)
     });
@@ -314,6 +386,13 @@ async function getCurrentWorkoutPlan(req, res, next) {
         planName: plan.plan_name || null,
         startTime: plan.schedule_start_time ? String(plan.schedule_start_time) : null,
         endTime: plan.schedule_end_time ? String(plan.schedule_end_time) : null,
+        estimatedCaloriesBurned: plan.estimated_calories_burned === null || plan.estimated_calories_burned === undefined
+          ? null
+          : Number(plan.estimated_calories_burned),
+        preWorkoutMealTime: plan.pre_workout_meal_time ? String(plan.pre_workout_meal_time) : null,
+        preWorkoutMealText: plan.pre_workout_meal_text || null,
+        postWorkoutMealTime: plan.post_workout_meal_time ? String(plan.post_workout_meal_time) : null,
+        postWorkoutMealText: plan.post_workout_meal_text || null,
         filePath: plan.file_path || null,
         createdAt: plan.created_at
       },
@@ -360,7 +439,14 @@ async function getTodayWorkoutPlan(req, res, next) {
         planId: plan.plan_id,
         planName: plan.plan_name || null,
         startTime: plan.schedule_start_time ? String(plan.schedule_start_time) : null,
-        endTime: plan.schedule_end_time ? String(plan.schedule_end_time) : null
+        endTime: plan.schedule_end_time ? String(plan.schedule_end_time) : null,
+        estimatedCaloriesBurned: plan.estimated_calories_burned === null || plan.estimated_calories_burned === undefined
+          ? null
+          : Number(plan.estimated_calories_burned),
+        preWorkoutMealTime: plan.pre_workout_meal_time ? String(plan.pre_workout_meal_time) : null,
+        preWorkoutMealText: plan.pre_workout_meal_text || null,
+        postWorkoutMealTime: plan.post_workout_meal_time ? String(plan.post_workout_meal_time) : null,
+        postWorkoutMealText: plan.post_workout_meal_text || null
       },
       exercises: schedule.exercisesForDay,
       session: session
@@ -413,8 +499,12 @@ async function setTodayWorkoutAction(req, res, next) {
     if (!session) {
       const planName = plan.plan_name ? String(plan.plan_name) : "Workout";
       const durationMinutes = diffMinutes(plan.schedule_start_time, plan.schedule_end_time) || 90;
+      const caloriesBurned = estimateWorkoutCalories({
+        explicitCalories: plan.estimated_calories_burned,
+        durationMinutes
+      });
 
-      const sessionId = randomUUID();
+      const sessionId = createId("ws");
       session = await workoutModel.createWorkoutSession({
         sessionId,
         userId: req.user.userId,
@@ -422,14 +512,23 @@ async function setTodayWorkoutAction(req, res, next) {
         workoutType: "strength",
         muscleGroup: planName,
         durationMinutes,
-        caloriesBurned: 0,
+        caloriesBurned,
         planId: plan.plan_id
       });
       session = { session_id: sessionId };
+    } else {
+      const durationMinutes = Number(session.duration_minutes || (diffMinutes(plan.schedule_start_time, plan.schedule_end_time) || 90));
+      const caloriesBurned = estimateWorkoutCalories({
+        explicitCalories: session.calories_burned,
+        durationMinutes
+      });
+      if (Number(session.calories_burned || 0) <= 0 && caloriesBurned > 0) {
+        await workoutModel.updateWorkoutSessionCalories(session.session_id, req.user.userId, caloriesBurned);
+      }
     }
 
     const actionId = await workoutModel.upsertWorkoutAction({
-      actionId: randomUUID(),
+      actionId: createId("wa"),
       sessionId: session.session_id,
       userId: req.user.userId,
       status
@@ -443,11 +542,28 @@ async function setTodayWorkoutAction(req, res, next) {
       action: actionType
     });
 
+    let fitSync = null;
+    let fitDaily = null;
     if (actionType === "done") {
-      await integrationService.pushWorkoutToGoogleFit(req.user.userId, session.session_id);
+      fitSync = await integrationService.pushWorkoutToGoogleFit(req.user.userId, session.session_id).catch((error) => ({
+        sessionId: session.session_id,
+        googleFitSessionId: null,
+        syncStatus: "failed",
+        reason: String(error?.message || "Google Fit sync failed")
+      }));
+      fitDaily = await integrationService.syncGoogleFitDailyMetrics(req.user.userId, date)
+        .catch(() => integrationService.getFitDailyMetrics(req.user.userId, date).catch(() => null));
     }
 
-    return res.status(200).json({ date, sessionId: session.session_id, actionId, status: actionType });
+    return res.status(200).json({
+      date,
+      sessionId: session.session_id,
+      actionId,
+      status: actionType,
+      fitSyncStatus: fitSync?.syncStatus || null,
+      fitSyncReason: fitSync?.reason || null,
+      fitDailyCalories: fitDaily?.calories ?? null
+    });
   } catch (error) {
     return next(error);
   }
@@ -459,6 +575,7 @@ module.exports = {
   getFitnessSummary,
   getFitDaily,
   getFitRange,
+  getFitActivities,
   uploadWorkoutPlan,
   getCurrentWorkoutPlan,
   getTodayWorkoutPlan,

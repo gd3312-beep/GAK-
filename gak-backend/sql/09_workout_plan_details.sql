@@ -55,6 +55,71 @@ PREPARE stmt FROM @sql;
 EXECUTE stmt;
 DEALLOCATE PREPARE stmt;
 
+SET @has_estimated_calories_burned = (
+  SELECT COUNT(*) FROM information_schema.columns
+  WHERE table_schema = @db_name AND table_name = 'workout_plan' AND column_name = 'estimated_calories_burned'
+);
+SET @sql = IF(
+  @has_estimated_calories_burned = 0,
+  'ALTER TABLE workout_plan ADD COLUMN estimated_calories_burned FLOAT NULL',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @has_pre_workout_meal_time = (
+  SELECT COUNT(*) FROM information_schema.columns
+  WHERE table_schema = @db_name AND table_name = 'workout_plan' AND column_name = 'pre_workout_meal_time'
+);
+SET @sql = IF(
+  @has_pre_workout_meal_time = 0,
+  'ALTER TABLE workout_plan ADD COLUMN pre_workout_meal_time TIME NULL',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @has_pre_workout_meal_text = (
+  SELECT COUNT(*) FROM information_schema.columns
+  WHERE table_schema = @db_name AND table_name = 'workout_plan' AND column_name = 'pre_workout_meal_text'
+);
+SET @sql = IF(
+  @has_pre_workout_meal_text = 0,
+  'ALTER TABLE workout_plan ADD COLUMN pre_workout_meal_text VARCHAR(255) NULL',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @has_post_workout_meal_time = (
+  SELECT COUNT(*) FROM information_schema.columns
+  WHERE table_schema = @db_name AND table_name = 'workout_plan' AND column_name = 'post_workout_meal_time'
+);
+SET @sql = IF(
+  @has_post_workout_meal_time = 0,
+  'ALTER TABLE workout_plan ADD COLUMN post_workout_meal_time TIME NULL',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @has_post_workout_meal_text = (
+  SELECT COUNT(*) FROM information_schema.columns
+  WHERE table_schema = @db_name AND table_name = 'workout_plan' AND column_name = 'post_workout_meal_text'
+);
+SET @sql = IF(
+  @has_post_workout_meal_text = 0,
+  'ALTER TABLE workout_plan ADD COLUMN post_workout_meal_text VARCHAR(255) NULL',
+  'SELECT 1'
+);
+PREPARE stmt FROM @sql;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
 CREATE TABLE IF NOT EXISTS workout_plan_exercise (
   exercise_id VARCHAR(255) PRIMARY KEY,
   plan_id VARCHAR(255) NOT NULL,

@@ -1,8 +1,7 @@
-const { randomUUID } = require("crypto");
-
 const attendanceModel = require("../models/attendance.model");
 const subjectModel = require("../models/subject.model");
 const timetableModel = require("../models/timetable.model");
+const { createId } = require("../utils/id.util");
 
 async function markAttendance({ userId, subjectId, timetableEntryId, classDate, attended }) {
   const subjectExists = await subjectModel.existsById(subjectId);
@@ -18,7 +17,7 @@ async function markAttendance({ userId, subjectId, timetableEntryId, classDate, 
     }
   }
 
-  const attendanceId = randomUUID();
+  const attendanceId = createId("att");
 
   await attendanceModel.createAttendanceRecord({
     attendanceId,

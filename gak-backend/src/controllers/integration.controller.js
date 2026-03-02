@@ -357,6 +357,44 @@ async function getAcademiaData(req, res, next) {
   }
 }
 
+async function listAcademicSources(req, res, next) {
+  try {
+    const rows = await integrationService.listAcademicSources(req.user.userId);
+    return res.status(200).json(rows);
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function registerAcademicSource(req, res, next) {
+  try {
+    const payload = await integrationService.registerAcademicSource(req.user.userId, req.body || {});
+    return res.status(201).json(payload);
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (message.toLowerCase().includes("required") || message.toLowerCase().includes("must be")) {
+      return res.status(400).json({ message });
+    }
+    return next(error);
+  }
+}
+
+async function removeAcademicSource(req, res, next) {
+  try {
+    const payload = await integrationService.removeAcademicSource(req.user.userId, req.params?.enrollmentId);
+    return res.status(200).json(payload);
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (message.toLowerCase().includes("required")) {
+      return res.status(400).json({ message });
+    }
+    if (message.toLowerCase().includes("not found")) {
+      return res.status(404).json({ message });
+    }
+    return next(error);
+  }
+}
+
 module.exports = {
   getGoogleAuthUrl,
   handleGoogleCallback,
@@ -376,5 +414,8 @@ module.exports = {
   syncAcademia,
   syncAcademiaReports,
   getAcademiaStatus,
-  getAcademiaData
+  getAcademiaData,
+  listAcademicSources,
+  registerAcademicSource,
+  removeAcademicSource
 };
