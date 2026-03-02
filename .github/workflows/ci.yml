@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - codex/**
+
+jobs:
+  frontend-checks:
+    name: Frontend Build Test Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: Frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm run test
+
+      - name: Lint
+        run: npm run lint
+
+  backend-checks:
+    name: Backend Test Smoke
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: GAK
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    defaults:
+      run:
+        working-directory: gak-backend
+    env:
+      MYSQL_USER: root
+      MYSQL_PASSWORD: root
+      MYSQL_HOST: 127.0.0.1
+      MYSQL_PORT: 3306
+      MYSQL_SOCKET: ""
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: root
+      DB_NAME: GAK
+      HOST: 127.0.0.1
+      PORT: 4000
+      NODE_ENV: development
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: gak-backend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Wait for MySQL
+        run: |
+          for i in {1..30}; do
+            if mysql -h 127.0.0.1 -uroot -proot -e "SELECT 1" >/dev/null 2>&1; then
+              echo "MySQL ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "MySQL did not become ready in time"
+          exit 1
+
+      - name: Bootstrap DB
+        run: npm run db:bootstrap
+
+      - name: Backend Unit Tests
+        run: npm test
+
+      - name: Start Backend
+        run: |
+          nohup node server.js > /tmp/gak-backend.log 2>&1 &
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:4000/health >/dev/null; then
+              echo "Backend ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Backend did not start in time"
+          cat /tmp/gak-backend.log || true
+          exit 1
+
+      - name: API Smoke Test
+        run: npm run smoke:api
+
+      - name: Backend Log (always)
+        if: always()
+        run: cat /tmp/gak-backend.log || true
