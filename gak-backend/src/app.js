@@ -91,6 +91,7 @@ app.use(
   })
 );
 
+// Security middleware should be installed before routes to cover all endpoints.
 app.use(helmet());
 app.use(express.json({ limit: "1mb" }));
 app.use(auditMiddleware);

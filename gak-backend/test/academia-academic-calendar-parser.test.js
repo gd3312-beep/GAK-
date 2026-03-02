@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const scraper = require("../src/utils/academia.scraper.util");
+const scraper = require("../src/utils/academia-scraper.util");
 
 function readFixture(name) {
   return fs.readFileSync(path.join(__dirname, "fixtures", "academic-calendar", name), "utf8");

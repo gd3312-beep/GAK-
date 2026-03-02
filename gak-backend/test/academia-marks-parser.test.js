@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const scraper = require("../src/utils/academia.scraper.util");
+const scraper = require("../src/utils/academia-scraper.util");
 const integrationService = require("../src/services/integration.service");
 
 const fixturesDir = path.join(__dirname, "fixtures", "marks");

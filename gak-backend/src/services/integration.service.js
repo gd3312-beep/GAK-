@@ -16,7 +16,7 @@ const {
   extractGmailMessageText,
   deriveAcademicSource
 } = require("../utils/email.util");
-const { scrapeAcademiaData, captureAcademiaStorageState } = require("../utils/academia.scraper.util");
+const { scrapeAcademiaData, captureAcademiaStorageState } = require("../utils/academia-scraper.util");
 const { createId, createNonce } = require("../utils/id.util");
 
 function isGoogleConfigured() {

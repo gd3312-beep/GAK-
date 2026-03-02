@@ -1,0 +1,9 @@
+node_modules
+npm-debug.log
+.env
+.env.local
+.env.production.local
+tmp
+uploads
+test
+legacy-typescript
