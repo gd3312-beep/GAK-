@@ -15,6 +15,7 @@ import {
   ChevronRight,
   Settings,
   LogOut,
+  FileText,
   BookOpen,
   Dumbbell,
   Utensils,
@@ -54,6 +55,8 @@ type IntegrationStatus = {
     isPrimary: boolean;
     hasFitPermissions?: boolean | null;
     hasCalendarGmailPermissions?: boolean | null;
+    hasTasksPermissions?: boolean | null;
+    hasDocsPermissions?: boolean | null;
     createdAt: string | null;
     updatedAt: string | null;
   }>;
@@ -192,7 +195,7 @@ const Profile = () => {
 
   if (!user) return null;
 
-  const startGoogleOAuth = async (purpose: "calendar_gmail" | "fit" | "all" = "all") => {
+  const startGoogleOAuth = async (purpose: "calendar_gmail" | "fit" | "tasks" | "docs" | "all" = "all") => {
     try {
       setError("");
       setGmailMessage(null);
@@ -347,6 +350,8 @@ const Profile = () => {
   const googleAccountCount = status?.googleAccountCount ?? googleAccounts.length;
   const googleConnected = Boolean(status?.googleConnected);
   const fitLocked = Boolean(status?.fitGoogleAccountLocked);
+  const tasksConnected = googleAccounts.some((item) => item.hasTasksPermissions === true);
+  const docsConnected = googleAccounts.some((item) => item.hasDocsPermissions === true);
   const googleSummary = googleConnected
     ? `${googleAccountCount} account${googleAccountCount === 1 ? "" : "s"}${primaryGoogleAccount?.email ? ` • primary ${primaryGoogleAccount.email}` : ""}`
     : "Not connected";
@@ -354,6 +359,16 @@ const Profile = () => {
     ? `Locked to ${status?.fitGoogleAccountEmail || "selected account"}`
     : googleConnected
       ? "Choose one linked account once for Fit"
+      : "Connect Google account first";
+  const tasksSummary = tasksConnected
+    ? "Planner task sync enabled"
+    : googleConnected
+      ? "Grant Google Tasks permission to sync planner items"
+      : "Connect Google account first";
+  const docsSummary = docsConnected
+    ? "Planner export to Docs enabled"
+    : googleConnected
+      ? "Grant Google Docs permission to export planner report"
       : "Connect Google account first";
 
   const integrations = [
@@ -386,6 +401,26 @@ const Profile = () => {
       border: "border-l-ahara",
       iconBg: "bg-ahara/10",
       iconColor: "text-ahara"
+    },
+    {
+      id: "googletasks",
+      name: "Google Tasks",
+      icon: CheckCircle,
+      connected: tasksConnected,
+      lastSync: tasksSummary,
+      border: "border-l-gak",
+      iconBg: "bg-gak/10",
+      iconColor: "text-gak"
+    },
+    {
+      id: "googledocs",
+      name: "Google Docs",
+      icon: FileText,
+      connected: docsConnected,
+      lastSync: docsSummary,
+      border: "border-l-gak",
+      iconBg: "bg-gak/10",
+      iconColor: "text-gak"
     }
   ];
 
@@ -615,17 +650,29 @@ const Profile = () => {
                               return;
                             }
                             setError("Choose a linked Google account for Fit below (one-time).");
+                          } else if (integration.id === "googletasks") {
+                            void startGoogleOAuth("tasks");
+                          } else if (integration.id === "googledocs") {
+                            void startGoogleOAuth("docs");
                           } else {
                             const purpose =
-                              integration.id === "googlecalendar" || integration.id === "gmail"
+                              integration.id === "googlecalendar" || integration.id === "calendar" || integration.id === "gmail"
                                 ? "calendar_gmail"
                                 : integration.id === "googlefit"
                                   ? "fit"
+                                  : integration.id === "googletasks"
+                                    ? "tasks"
+                                    : integration.id === "googledocs"
+                                      ? "docs"
                                   : "all";
                             void startGoogleOAuth(purpose);
                           }
                         } else if (integration.id === "gmail") {
                           void parseGmail();
+                        } else if (integration.id === "googletasks") {
+                          navigate("/planner");
+                        } else if (integration.id === "googledocs") {
+                          navigate("/planner");
                         } else if (integration.id === "googlefit") {
                           navigate("/karma");
                         } else {

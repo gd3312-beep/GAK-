@@ -7,6 +7,14 @@ const PURPOSE_SCOPES = {
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/gmail.readonly"
   ],
+  tasks: [
+    ...BASE_SCOPES,
+    "https://www.googleapis.com/auth/tasks"
+  ],
+  docs: [
+    ...BASE_SCOPES,
+    "https://www.googleapis.com/auth/documents"
+  ],
   fit: [
     ...BASE_SCOPES,
     "https://www.googleapis.com/auth/fitness.activity.read",
@@ -18,6 +26,8 @@ const PURPOSE_SCOPES = {
     ...BASE_SCOPES,
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/tasks",
+    "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/fitness.activity.read",
     "https://www.googleapis.com/auth/fitness.activity.write",
     "https://www.googleapis.com/auth/fitness.body.read",
@@ -84,7 +94,11 @@ function normalizePurpose(purpose) {
   const raw = String(purpose || "").trim().toLowerCase();
   if (!raw) return null;
   if (raw === "calendar" || raw === "gmail") return "calendar_gmail";
+  if (raw === "planner" || raw === "task") return "tasks";
+  if (raw === "doc" || raw === "document") return "docs";
   if (raw === "calendar_gmail" || raw === "fit" || raw === "all") return raw;
+  if (raw === "docs") return raw;
+  if (raw === "tasks") return raw;
   return null;
 }
 

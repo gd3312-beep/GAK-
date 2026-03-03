@@ -270,6 +270,10 @@ const Planner = () => {
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [taskSyncBusy, setTaskSyncBusy] = useState(false);
+  const [taskSyncMessage, setTaskSyncMessage] = useState<string | null>(null);
+  const [docExportBusy, setDocExportBusy] = useState(false);
+  const [docExportMessage, setDocExportMessage] = useState<string | null>(null);
   const [events, setEvents] = useState<EventRow[]>([]);
   const [analytics, setAnalytics] = useState<AnalyticsPayload | null>(null);
   const [timetableRows, setTimetableRows] = useState<TimetableRow[]>([]);
@@ -703,6 +707,86 @@ const Planner = () => {
     });
   }, [analytics, events]);
 
+  const syncDeadlinesToGoogleTasks = async () => {
+    if (deadlines.length === 0) {
+      setTaskSyncMessage("No deadline items to sync.");
+      return;
+    }
+
+    try {
+      setError("");
+      setTaskSyncMessage(null);
+      setTaskSyncBusy(true);
+
+      const items = deadlines.map((item) => ({
+        id: item.id,
+        title: item.subject,
+        dueDateIso: item.dueDateIso,
+        sourceLabel: item.sourceLabel,
+        assessmentLabel: item.assessmentLabel,
+        optimalStart: item.optimalStart,
+        recommendedWindow: item.recommendedWindow,
+        concisePlan: item.concisePlan,
+        aiDetail: item.aiDetail
+      }));
+
+      const payload = await apiRequest<{ created: number; skipped: number }>("/api/integrations/tasks/sync-planner", {
+        method: "POST",
+        body: { items }
+      });
+      const created = Number(payload?.created || 0);
+      const skipped = Number(payload?.skipped || 0);
+      setTaskSyncMessage(`Synced ${created} task${created === 1 ? "" : "s"}${skipped > 0 ? ` (${skipped} skipped)` : ""}.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to sync Google Tasks");
+    } finally {
+      setTaskSyncBusy(false);
+    }
+  };
+
+  const exportDeadlinesToGoogleDoc = async () => {
+    if (deadlines.length === 0) {
+      setDocExportMessage("No deadline items to export.");
+      return;
+    }
+
+    try {
+      setError("");
+      setDocExportMessage(null);
+      setDocExportBusy(true);
+
+      const items = deadlines.map((item) => ({
+        id: item.id,
+        title: item.subject,
+        dueDateIso: item.dueDateIso,
+        sourceLabel: item.sourceLabel,
+        assessmentLabel: item.assessmentLabel,
+        status: item.status,
+        optimalStart: item.optimalStart,
+        recommendedWindow: item.recommendedWindow,
+        concisePlan: item.concisePlan,
+        aiDetail: item.aiDetail
+      }));
+
+      const payload = await apiRequest<{ url: string | null; documentId: string | null; title: string | null }>("/api/integrations/docs/planner-export", {
+        method: "POST",
+        body: {
+          title: `GAK Planner Export ${new Date().toISOString().slice(0, 10)}`,
+          items
+        }
+      });
+
+      if (payload?.url) {
+        window.open(payload.url, "_blank", "noopener,noreferrer");
+      }
+      setDocExportMessage(payload?.title ? `Exported to Google Doc: ${payload.title}` : "Exported to Google Doc.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to export Google Doc");
+    } finally {
+      setDocExportBusy(false);
+    }
+  };
+
   if (!user) return null;
 
   return (
@@ -916,14 +1000,38 @@ const Planner = () => {
                 <AlertTriangle className="h-4 w-4 text-warning" />
                 <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wide">Deadlines</h2>
               </div>
-              <button
-                type="button"
-                onClick={() => setShowAiDetails((value) => !value)}
-                className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
-              >
-                {showAiDetails ? "Hide AI details" : "Show AI details"}
-              </button>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void syncDeadlinesToGoogleTasks()}
+                  disabled={taskSyncBusy || deadlines.length === 0}
+                  className="text-[11px] h-7 px-2"
+                >
+                  {taskSyncBusy ? "Syncing..." : "Sync to Tasks"}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void exportDeadlinesToGoogleDoc()}
+                  disabled={docExportBusy || deadlines.length === 0}
+                  className="text-[11px] h-7 px-2"
+                >
+                  {docExportBusy ? "Exporting..." : "Export to Docs"}
+                </Button>
+                <button
+                  type="button"
+                  onClick={() => setShowAiDetails((value) => !value)}
+                  className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  {showAiDetails ? "Hide AI details" : "Show AI details"}
+                </button>
+              </div>
             </div>
+            {taskSyncMessage && <p className="text-xs text-safe mb-2">{taskSyncMessage}</p>}
+            {docExportMessage && <p className="text-xs text-safe mb-2">{docExportMessage}</p>}
             <div className="space-y-2">
               {deadlines.length === 0 ? (
                 <div className="glass-card p-4 text-sm text-muted-foreground">No upcoming academic deadlines in calendar.</div>

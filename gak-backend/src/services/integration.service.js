@@ -19,6 +19,9 @@ const {
 const { scrapeAcademiaData, captureAcademiaStorageState } = require("../utils/academia-scraper.util");
 const { createId, createNonce } = require("../utils/id.util");
 
+const GOOGLE_TASKS_SCOPE = "https://www.googleapis.com/auth/tasks";
+const GOOGLE_DOCS_SCOPE = "https://www.googleapis.com/auth/documents";
+
 function isGoogleConfigured() {
   try {
     ensureGoogleOauthConfig();
@@ -59,6 +62,8 @@ function normalizeGoogleAccount(account) {
     "https://www.googleapis.com/auth/fitness.body.read"
   ];
   const requiredCalendarGmailScopes = getScopesForPurpose("calendar_gmail").filter((s) => !["openid", "email", "profile"].includes(String(s)));
+  const requiredTasksScopes = getScopesForPurpose("tasks").filter((s) => !["openid", "email", "profile"].includes(String(s)));
+  const requiredDocsScopes = getScopesForPurpose("docs").filter((s) => !["openid", "email", "profile"].includes(String(s)));
 
   return {
     accountId: account.account_id,
@@ -70,6 +75,8 @@ function normalizeGoogleAccount(account) {
     isPrimary: Number(account.is_primary || 0) === 1,
     hasFitPermissions: scopesRaw ? hasRequiredScopes(granted, requiredFitScopes) : null,
     hasCalendarGmailPermissions: scopesRaw ? hasRequiredScopes(granted, requiredCalendarGmailScopes) : null,
+    hasTasksPermissions: scopesRaw ? hasRequiredScopes(granted, requiredTasksScopes) : null,
+    hasDocsPermissions: scopesRaw ? hasRequiredScopes(granted, requiredDocsScopes) : null,
     createdAt: account.created_at || null,
     updatedAt: account.updated_at || null
   };
@@ -332,6 +339,394 @@ async function pushCalendarEventToGoogle(userId, { title, eventDate, googleAccou
   }
 
   return { googleEventId, syncStatus };
+}
+
+function normalizeTaskListId(value) {
+  const taskListId = String(value || "").trim();
+  return taskListId || "@default";
+}
+
+function normalizeTaskTitle(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, 1024);
+}
+
+function normalizeTaskNotes(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  return text.slice(0, 8192);
+}
+
+function normalizeTaskDue(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    return `${raw}T23:59:59.000Z`;
+  }
+
+  const dt = new Date(raw);
+  if (Number.isNaN(dt.getTime())) return null;
+  return dt.toISOString();
+}
+
+function normalizeGoogleTask(task) {
+  if (!task) return null;
+  return {
+    id: task.id || null,
+    title: task.title || "",
+    notes: task.notes || null,
+    due: task.due || null,
+    status: task.status || "needsAction",
+    completed: task.completed || null,
+    updated: task.updated || null,
+    selfLink: task.selfLink || null
+  };
+}
+
+function normalizeGoogleTaskList(item) {
+  if (!item) return null;
+  return {
+    id: item.id || null,
+    title: item.title || "",
+    updated: item.updated || null,
+    selfLink: item.selfLink || null
+  };
+}
+
+function buildPlannerTaskFromItem(item) {
+  const title = normalizeTaskTitle(item?.title || item?.subject || "");
+  if (!title) return null;
+
+  const due = normalizeTaskDue(item?.dueDateIso || item?.dueDate || item?.due || null);
+  const sourceLabel = String(item?.sourceLabel || item?.source || "").trim();
+  const assessmentLabel = String(item?.assessmentLabel || item?.assessmentType || "").trim();
+  const recommendedWindow = String(item?.recommendedWindow || "").trim();
+  const optimalStart = String(item?.optimalStart || "").trim();
+  const concisePlan = String(item?.concisePlan || item?.microcopy || "").trim();
+  const detail = String(item?.aiDetail || "").trim();
+
+  const notesLines = [];
+  if (sourceLabel) notesLines.push(`Source: ${sourceLabel}`);
+  if (assessmentLabel) notesLines.push(`Type: ${assessmentLabel}`);
+  if (optimalStart) notesLines.push(`Suggested start: ${optimalStart}`);
+  if (recommendedWindow) notesLines.push(`Window: ${recommendedWindow}`);
+  if (concisePlan) notesLines.push(concisePlan);
+  if (detail) notesLines.push(detail);
+  if (item?.id) notesLines.push(`GAK Planner ID: ${String(item.id)}`);
+
+  return {
+    title,
+    due,
+    notes: normalizeTaskNotes(notesLines.join("\n"))
+  };
+}
+
+async function buildGoogleTasksClient(userId, { accountId = null } = {}) {
+  const tokenRow = accountId
+    ? await integrationModel.getGoogleAccountById(userId, accountId)
+    : await integrationModel.getUserGoogleTokens(userId);
+  if (!tokenRow) {
+    throw new Error("Google account not connected");
+  }
+
+  const grantedScopesRaw = String(tokenRow.granted_scopes || "").trim();
+  if (grantedScopesRaw) {
+    const granted = parseGrantedScopes(grantedScopesRaw);
+    if (!hasRequiredScopes(granted, [GOOGLE_TASKS_SCOPE])) {
+      throw new Error("Google Tasks permission missing. Reconnect Google with purpose=tasks or purpose=all.");
+    }
+  }
+
+  const targetAccountId = tokenRow.account_id || accountId || null;
+  const authClient = await buildUserGoogleClient(userId, targetAccountId);
+  if (!authClient) {
+    throw new Error("Unable to use selected Google account token");
+  }
+
+  return {
+    accountId: targetAccountId,
+    tasksApi: google.tasks({ version: "v1", auth: authClient })
+  };
+}
+
+async function listGoogleTaskLists(userId, {
+  accountId = null,
+  maxResults = 20
+} = {}) {
+  const { accountId: resolvedAccountId, tasksApi } = await buildGoogleTasksClient(userId, { accountId });
+  const capped = Math.max(1, Math.min(100, Number(maxResults || 20)));
+  const resp = await tasksApi.tasklists.list({ maxResults: capped });
+  const rows = Array.isArray(resp?.data?.items) ? resp.data.items : [];
+
+  return {
+    accountId: resolvedAccountId,
+    taskLists: rows.map((row) => normalizeGoogleTaskList(row)).filter(Boolean)
+  };
+}
+
+async function listGoogleTasks(userId, {
+  accountId = null,
+  taskListId = "@default",
+  maxResults = 100,
+  showCompleted = false,
+  showHidden = false
+} = {}) {
+  const { accountId: resolvedAccountId, tasksApi } = await buildGoogleTasksClient(userId, { accountId });
+  const resolvedTaskListId = normalizeTaskListId(taskListId);
+  const capped = Math.max(1, Math.min(200, Number(maxResults || 100)));
+
+  const resp = await tasksApi.tasks.list({
+    tasklist: resolvedTaskListId,
+    maxResults: capped,
+    showCompleted: Boolean(showCompleted),
+    showHidden: Boolean(showHidden)
+  });
+  const rows = Array.isArray(resp?.data?.items) ? resp.data.items : [];
+
+  return {
+    accountId: resolvedAccountId,
+    taskListId: resolvedTaskListId,
+    tasks: rows.map((row) => normalizeGoogleTask(row)).filter(Boolean)
+  };
+}
+
+async function createGoogleTask(userId, {
+  accountId = null,
+  taskListId = "@default",
+  title,
+  notes = null,
+  due = null
+} = {}) {
+  const safeTitle = normalizeTaskTitle(title);
+  if (!safeTitle) {
+    throw new Error("title is required");
+  }
+
+  const { accountId: resolvedAccountId, tasksApi } = await buildGoogleTasksClient(userId, { accountId });
+  const resolvedTaskListId = normalizeTaskListId(taskListId);
+  const dueIso = normalizeTaskDue(due);
+  if (due && !dueIso) {
+    throw new Error("due must be a valid date or datetime");
+  }
+
+  const result = await tasksApi.tasks.insert({
+    tasklist: resolvedTaskListId,
+    requestBody: {
+      title: safeTitle,
+      notes: normalizeTaskNotes(notes),
+      due: dueIso || undefined
+    }
+  });
+
+  return {
+    accountId: resolvedAccountId,
+    taskListId: resolvedTaskListId,
+    task: normalizeGoogleTask(result?.data || null)
+  };
+}
+
+async function completeGoogleTask(userId, {
+  accountId = null,
+  taskListId = "@default",
+  taskId
+} = {}) {
+  const safeTaskId = String(taskId || "").trim();
+  if (!safeTaskId) {
+    throw new Error("taskId is required");
+  }
+
+  const { accountId: resolvedAccountId, tasksApi } = await buildGoogleTasksClient(userId, { accountId });
+  const resolvedTaskListId = normalizeTaskListId(taskListId);
+
+  const result = await tasksApi.tasks.patch({
+    tasklist: resolvedTaskListId,
+    task: safeTaskId,
+    requestBody: {
+      status: "completed",
+      completed: new Date().toISOString()
+    }
+  });
+
+  return {
+    accountId: resolvedAccountId,
+    taskListId: resolvedTaskListId,
+    task: normalizeGoogleTask(result?.data || null)
+  };
+}
+
+async function syncPlannerToGoogleTasks(userId, {
+  accountId = null,
+  taskListId = "@default",
+  items = []
+} = {}) {
+  const plannerItems = Array.isArray(items) ? items : [];
+  const prepared = plannerItems
+    .map((item) => buildPlannerTaskFromItem(item))
+    .filter(Boolean);
+  if (!prepared.length) {
+    return {
+      accountId: accountId || null,
+      taskListId: normalizeTaskListId(taskListId),
+      created: 0,
+      skipped: plannerItems.length,
+      tasks: []
+    };
+  }
+
+  const seen = new Set();
+  const deduped = [];
+  for (const item of prepared) {
+    const key = `${item.title.toLowerCase()}::${String(item.due || "")}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(item);
+  }
+
+  const { accountId: resolvedAccountId, tasksApi } = await buildGoogleTasksClient(userId, { accountId });
+  const resolvedTaskListId = normalizeTaskListId(taskListId);
+
+  const createdTasks = [];
+  let skipped = plannerItems.length - deduped.length;
+  for (const item of deduped) {
+    try {
+      const result = await tasksApi.tasks.insert({
+        tasklist: resolvedTaskListId,
+        requestBody: {
+          title: item.title,
+          notes: item.notes || undefined,
+          due: item.due || undefined
+        }
+      });
+      const normalized = normalizeGoogleTask(result?.data || null);
+      if (normalized) {
+        createdTasks.push(normalized);
+      } else {
+        skipped += 1;
+      }
+    } catch (_error) {
+      skipped += 1;
+    }
+  }
+
+  return {
+    accountId: resolvedAccountId,
+    taskListId: resolvedTaskListId,
+    created: createdTasks.length,
+    skipped,
+    tasks: createdTasks
+  };
+}
+
+async function buildGoogleDocsClient(userId, { accountId = null } = {}) {
+  const tokenRow = accountId
+    ? await integrationModel.getGoogleAccountById(userId, accountId)
+    : await integrationModel.getUserGoogleTokens(userId);
+  if (!tokenRow) {
+    throw new Error("Google account not connected");
+  }
+
+  const grantedScopesRaw = String(tokenRow.granted_scopes || "").trim();
+  if (grantedScopesRaw) {
+    const granted = parseGrantedScopes(grantedScopesRaw);
+    if (!hasRequiredScopes(granted, [GOOGLE_DOCS_SCOPE])) {
+      throw new Error("Google Docs permission missing. Reconnect Google with purpose=docs or purpose=all.");
+    }
+  }
+
+  const targetAccountId = tokenRow.account_id || accountId || null;
+  const authClient = await buildUserGoogleClient(userId, targetAccountId);
+  if (!authClient) {
+    throw new Error("Unable to use selected Google account token");
+  }
+
+  return {
+    accountId: targetAccountId,
+    docsApi: google.docs({ version: "v1", auth: authClient })
+  };
+}
+
+function normalizeDocTitle(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, 255);
+}
+
+function formatDueLabelFromItem(item) {
+  const raw = String(item?.dueDateIso || item?.dueDate || item?.due || "").trim();
+  if (!raw) return "No due date";
+  const dateOnly = raw.slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dateOnly)) return dateOnly;
+  const dt = new Date(raw);
+  if (Number.isNaN(dt.getTime())) return raw;
+  return toIsoDate(dt);
+}
+
+function buildPlannerDocText(items) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) {
+    return "Planner export\n\nNo planner items were provided.\n";
+  }
+
+  const lines = ["GAK Planner Export", "", `Generated: ${new Date().toISOString()}`, ""];
+  list.forEach((item, idx) => {
+    const title = normalizeTaskTitle(item?.title || item?.subject || `Item ${idx + 1}`);
+    const due = formatDueLabelFromItem(item);
+    const status = String(item?.status || "").trim();
+    const source = String(item?.sourceLabel || item?.source || "").trim();
+    const assessment = String(item?.assessmentLabel || item?.assessmentType || "").trim();
+    const windowText = String(item?.recommendedWindow || "").trim();
+    const plan = String(item?.concisePlan || item?.microcopy || "").trim();
+    const detail = String(item?.aiDetail || "").trim();
+
+    lines.push(`${idx + 1}. ${title}`);
+    lines.push(`   Due: ${due}`);
+    if (status) lines.push(`   Status: ${status}`);
+    if (source) lines.push(`   Source: ${source}`);
+    if (assessment) lines.push(`   Type: ${assessment}`);
+    if (windowText) lines.push(`   Window: ${windowText}`);
+    if (plan) lines.push(`   Plan: ${plan}`);
+    if (detail) lines.push(`   Notes: ${detail}`);
+    lines.push("");
+  });
+
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+async function createPlannerGoogleDoc(userId, {
+  accountId = null,
+  title = null,
+  items = []
+} = {}) {
+  const { accountId: resolvedAccountId, docsApi } = await buildGoogleDocsClient(userId, { accountId });
+  const safeTitle = normalizeDocTitle(title) || `GAK Planner Export - ${toIsoDate(new Date())}`;
+  const docText = buildPlannerDocText(items);
+
+  const createResp = await docsApi.documents.create({
+    requestBody: { title: safeTitle }
+  });
+  const documentId = String(createResp?.data?.documentId || "").trim();
+  if (!documentId) {
+    throw new Error("Google Docs create failed");
+  }
+
+  await docsApi.documents.batchUpdate({
+    documentId,
+    requestBody: {
+      requests: [
+        {
+          insertText: {
+            location: { index: 1 },
+            text: docText
+          }
+        }
+      ]
+    }
+  });
+
+  return {
+    accountId: resolvedAccountId,
+    documentId,
+    title: safeTitle,
+    url: `https://docs.google.com/document/d/${documentId}/edit`
+  };
 }
 
 async function pushWorkoutToGoogleFit(userId, sessionId) {
@@ -2312,6 +2707,12 @@ module.exports = {
   completeGoogleOAuth,
   completeGoogleOAuthFromState,
   createCalendarEvent,
+  listGoogleTaskLists,
+  listGoogleTasks,
+  createGoogleTask,
+  completeGoogleTask,
+  syncPlannerToGoogleTasks,
+  createPlannerGoogleDoc,
   pushWorkoutToGoogleFit,
   parseGmailForAcademicEvents,
   syncGoogleFitDailyMetrics,
