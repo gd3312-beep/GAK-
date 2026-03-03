@@ -1,3 +1,12 @@
 node_modules/
 .env
 .DS_Store
+gak-backend/tmp/
+gak-backend/uploads/workout-plans/
+gak-backend/backups/
+tmp_*.log
+Frontend/.env
+Frontend/.env.local
+Frontend/.env.production.local
+gak-backend/.env.local
+gak-backend/.env.production.local

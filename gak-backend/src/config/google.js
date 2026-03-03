@@ -1,5 +1,40 @@
 const { google } = require("googleapis");
 
+const BASE_SCOPES = ["openid", "email", "profile"];
+const PURPOSE_SCOPES = {
+  calendar_gmail: [
+    ...BASE_SCOPES,
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/gmail.readonly"
+  ],
+  tasks: [
+    ...BASE_SCOPES,
+    "https://www.googleapis.com/auth/tasks"
+  ],
+  docs: [
+    ...BASE_SCOPES,
+    "https://www.googleapis.com/auth/documents"
+  ],
+  fit: [
+    ...BASE_SCOPES,
+    "https://www.googleapis.com/auth/fitness.activity.read",
+    "https://www.googleapis.com/auth/fitness.activity.write",
+    "https://www.googleapis.com/auth/fitness.body.read",
+    "https://www.googleapis.com/auth/fitness.heart_rate.read"
+  ],
+  all: [
+    ...BASE_SCOPES,
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/tasks",
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/fitness.activity.read",
+    "https://www.googleapis.com/auth/fitness.activity.write",
+    "https://www.googleapis.com/auth/fitness.body.read",
+    "https://www.googleapis.com/auth/fitness.heart_rate.read"
+  ]
+};
+
 function isLocalHost(url) {
   return url.hostname === "localhost" || url.hostname === "127.0.0.1";
 }
@@ -52,25 +87,39 @@ function getScopes() {
     return configured;
   }
 
-  return [
-    "openid",
-    "email",
-    "profile",
-    "https://www.googleapis.com/auth/calendar.events",
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/fitness.activity.write",
-    "https://www.googleapis.com/auth/fitness.activity.read",
-    // Needed for heart-rate (com.google.heart_rate.bpm) aggregates.
-    "https://www.googleapis.com/auth/fitness.body.read"
-  ];
+  return PURPOSE_SCOPES.all;
 }
 
-function getGoogleAuthUrl(state) {
+function normalizePurpose(purpose) {
+  const raw = String(purpose || "").trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === "calendar" || raw === "gmail") return "calendar_gmail";
+  if (raw === "planner" || raw === "task") return "tasks";
+  if (raw === "doc" || raw === "document") return "docs";
+  if (raw === "calendar_gmail" || raw === "fit" || raw === "all") return raw;
+  if (raw === "docs") return raw;
+  if (raw === "tasks") return raw;
+  return null;
+}
+
+function getScopesForPurpose(purpose) {
+  const normalized = normalizePurpose(purpose);
+  if (normalized && PURPOSE_SCOPES[normalized]) {
+    return PURPOSE_SCOPES[normalized];
+  }
+
+  // Backward compatibility: if GOOGLE_OAUTH_SCOPES is explicitly configured, it wins.
+  return getScopes();
+}
+
+function getGoogleAuthUrl(state, { purpose = null } = {}) {
   const client = getOAuthClient();
   return client.generateAuthUrl({
     access_type: "offline",
-    prompt: "consent",
-    scope: getScopes(),
+    // Let users link multiple accounts without fighting cached sessions.
+    prompt: "consent select_account",
+    include_granted_scopes: true,
+    scope: getScopesForPurpose(purpose),
     state
   });
 }
@@ -81,11 +130,22 @@ async function getTokensFromCode(code) {
   return tokens;
 }
 
-function buildAuthedClient({ accessToken, refreshToken }) {
+function toExpiryDateMs(tokenExpiry) {
+  if (!tokenExpiry) return undefined;
+  if (typeof tokenExpiry === "number" && Number.isFinite(tokenExpiry)) {
+    return tokenExpiry;
+  }
+  const parsed = new Date(tokenExpiry);
+  const ms = parsed.getTime();
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+function buildAuthedClient({ accessToken, refreshToken, tokenExpiry = null }) {
   const client = getOAuthClient();
   client.setCredentials({
     access_token: accessToken || undefined,
-    refresh_token: refreshToken || undefined
+    refresh_token: refreshToken || undefined,
+    expiry_date: toExpiryDateMs(tokenExpiry)
   });
   return client;
 }
@@ -95,5 +155,6 @@ module.exports = {
   ensureGoogleOauthConfig,
   getGoogleAuthUrl,
   getTokensFromCode,
-  buildAuthedClient
+  buildAuthedClient,
+  getScopesForPurpose
 };

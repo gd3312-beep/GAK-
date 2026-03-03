@@ -33,6 +33,68 @@ async function getTimetable(req, res, next) {
   }
 }
 
+async function getCurrentDayOrder(req, res, next) {
+  try {
+    const { userId } = req.params;
+    if (!ensureSelf(req, res, "userId")) return;
+    const formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Kolkata",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    });
+
+    const now = new Date();
+    const dateIso = formatter.format(now);
+    const tomorrowIso = formatter.format(new Date(now.getTime() + 24 * 60 * 60 * 1000));
+
+    const dayOrder = await timetableModel.getDayOrderForDate(userId, dateIso);
+    const tomorrowStatus = await timetableModel.getAcademicCalendarStatusForDate(userId, tomorrowIso);
+    const tomorrowFallbackDayOrder = await timetableModel.getDayOrderForDate(userId, tomorrowIso);
+    const tomorrowDayOrder = tomorrowStatus.dayOrder ?? tomorrowFallbackDayOrder;
+    const tomorrow = {
+      date: tomorrowIso,
+      dayOrder: tomorrowDayOrder,
+      isHoliday: Boolean(tomorrowStatus.isHoliday),
+      holidayDescription: tomorrowStatus.holidayDescription || null,
+      source: tomorrowStatus.source || "unavailable"
+    };
+
+    if (dayOrder) {
+      return res.status(200).json({
+        date: dateIso,
+        dayOrder,
+        source: "academic_calendar",
+        tomorrow
+      });
+    }
+
+    const weekday = new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Kolkata",
+      weekday: "short"
+    }).format(now).toLowerCase();
+    const weekdayMap = {
+      mon: 1,
+      tue: 2,
+      wed: 3,
+      thu: 4,
+      fri: 5
+    };
+    const fallbackDayOrder = Object.prototype.hasOwnProperty.call(weekdayMap, weekday)
+      ? weekdayMap[weekday]
+      : null;
+
+    return res.status(200).json({
+      date: dateIso,
+      dayOrder: fallbackDayOrder,
+      source: fallbackDayOrder ? "weekday_estimate" : "unavailable",
+      tomorrow
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
 async function postAttendance(req, res, next) {
   try {
     const { subjectId, timetableEntryId, classDate, attended } = req.body;
@@ -136,6 +198,7 @@ async function getMarks(req, res, next) {
 module.exports = {
   getSubjects,
   getTimetable,
+  getCurrentDayOrder,
   postAttendance,
   getAttendanceSummary,
   postMarks,

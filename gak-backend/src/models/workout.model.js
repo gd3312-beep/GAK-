@@ -95,6 +95,15 @@ async function getActionForSession(userId, sessionId) {
   return rows[0] || null;
 }
 
+async function updateWorkoutSessionCalories(sessionId, userId, caloriesBurned) {
+  await pool.execute(
+    `UPDATE workout_session
+     SET calories_burned = ?
+     WHERE session_id = ? AND user_id = ?`,
+    [Number(caloriesBurned || 0), sessionId, userId]
+  );
+}
+
 async function getWorkoutCompletionRate(userId) {
   const [rows] = await pool.execute(
     `SELECT
@@ -125,16 +134,22 @@ async function getCaloriesPerMinute(userId) {
 }
 
 async function getLatestBodyMetric(userId) {
-  const [rows] = await pool.execute(
-    `SELECT height, weight
-     FROM body_metric
-     WHERE user_id = ?
-     ORDER BY recorded_timestamp DESC
-     LIMIT 1`,
-    [userId]
-  );
-
-  return rows[0] || null;
+  try {
+    const [rows] = await pool.execute(
+      `SELECT height, weight
+       FROM body_metric
+       WHERE user_id = ?
+       ORDER BY recorded_timestamp DESC
+       LIMIT 1`,
+      [userId]
+    );
+    return rows[0] || null;
+  } catch (error) {
+    if (error && error.code === "ER_NO_SUCH_TABLE") {
+      return null;
+    }
+    throw error;
+  }
 }
 
 module.exports = {
@@ -144,6 +159,7 @@ module.exports = {
   upsertWorkoutAction,
   getSessionByUserAndDate,
   getActionForSession,
+  updateWorkoutSessionCalories,
   getWorkoutCompletionRate,
   getCaloriesPerMinute,
   getLatestBodyMetric

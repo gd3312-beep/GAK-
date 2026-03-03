@@ -27,6 +27,30 @@ function isStrongSecret(secret) {
   return value.length >= MIN_SECRET_LENGTH;
 }
 
+function hasPlaceholderSecret(secret) {
+  const value = String(secret || "").toLowerCase();
+  return value.includes("change_me") || value.includes("replace_with") || value.includes("default_dev");
+}
+
+function isProd() {
+  return String(process.env.NODE_ENV || "").toLowerCase() === "production";
+}
+
+function shouldEnforceClaims() {
+  const raw = String(process.env.JWT_ENFORCE_CLAIMS || "").toLowerCase().trim();
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  return isProd();
+}
+
+function getJwtIssuer() {
+  return String(process.env.JWT_ISSUER || "gak-backend").trim();
+}
+
+function getJwtAudience() {
+  return String(process.env.JWT_AUDIENCE || "gak-client").trim();
+}
+
 function assertJwtSecretsForRuntime() {
   const runtime = String(process.env.NODE_ENV || "development").toLowerCase();
   const primary = readPrimarySecret();
@@ -50,6 +74,15 @@ function assertJwtSecretsForRuntime() {
       break;
     }
   }
+
+  if (runtime === "production") {
+    if (hasPlaceholderSecret(primary)) {
+      throw new Error("JWT_SECRET must not use placeholder values in production");
+    }
+    if (previous.some((oldSecret) => hasPlaceholderSecret(oldSecret))) {
+      throw new Error("JWT_SECRET_PREVIOUS must not use placeholder values in production");
+    }
+  }
 }
 
 function getSigningSecret() {
@@ -61,16 +94,32 @@ function getVerificationSecrets() {
 }
 
 function signAuthToken(payload, options = {}) {
-  return jwt.sign(payload, getSigningSecret(), { expiresIn: "1d", ...options });
+  const claims = shouldEnforceClaims()
+    ? { issuer: getJwtIssuer(), audience: getJwtAudience() }
+    : {};
+
+  return jwt.sign(payload, getSigningSecret(), {
+    expiresIn: process.env.JWT_EXPIRES_IN || "12h",
+    algorithm: "HS256",
+    ...claims,
+    ...options
+  });
 }
 
 function verifyAuthToken(token) {
   const secrets = getVerificationSecrets();
+  const verifyOptions = {
+    algorithms: ["HS256"]
+  };
+  if (shouldEnforceClaims()) {
+    verifyOptions.issuer = getJwtIssuer();
+    verifyOptions.audience = getJwtAudience();
+  }
   let lastError = null;
 
   for (const secret of secrets) {
     try {
-      return jwt.verify(token, secret);
+      return jwt.verify(token, secret, verifyOptions);
     } catch (error) {
       lastError = error;
     }

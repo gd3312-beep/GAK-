@@ -6,9 +6,12 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "db:bootstrap": "bash scripts/bootstrap_db.sh",
-    "db:backup": "bash scripts/mysql_backup.sh",
-    "db:restore": "bash scripts/mysql_restore.sh"
+    "test": "sh -c 'files=$(find test -type f -name \"*.test.js\" 2>/dev/null); if [ -z \"$files\" ]; then echo \"No backend tests found\"; exit 0; fi; node --test $files'",
+    "smoke:api": "node scripts/smoke-api.js",
+    "db:bootstrap": "bash scripts/bootstrap-db.sh",
+    "db:truncate": "bash scripts/truncate-db.sh",
+    "db:backup": "bash scripts/mysql-backup.sh",
+    "db:restore": "bash scripts/mysql-restore.sh"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

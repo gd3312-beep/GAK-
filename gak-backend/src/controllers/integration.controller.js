@@ -47,9 +47,28 @@ function isOAuthConfigErrorMessage(message) {
   );
 }
 
+function normalizeGooglePurpose(purpose) {
+  const raw = String(purpose || "").trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === "calendar_gmail" || raw === "fit" || raw === "tasks" || raw === "docs" || raw === "all") return raw;
+  return null;
+}
+
+function parseBooleanQuery(value, fallback = false) {
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (!raw) return fallback;
+  if (["1", "true", "yes", "y", "on"].includes(raw)) return true;
+  if (["0", "false", "no", "n", "off"].includes(raw)) return false;
+  return fallback;
+}
+
 async function getGoogleAuthUrl(req, res, next) {
   try {
-    const authUrl = await integrationService.startGoogleOAuth(req.user.userId);
+    const purpose = normalizeGooglePurpose(req.query?.purpose);
+    if (req.query?.purpose && !purpose) {
+      return res.status(400).json({ message: "purpose must be one of: calendar_gmail, fit, tasks, docs, all" });
+    }
+    const authUrl = await integrationService.startGoogleOAuth(req.user.userId, { purpose });
     return res.status(200).json({ authUrl });
   } catch (error) {
     const message = String(error.message || "");
@@ -124,6 +143,22 @@ async function listCalendarEvents(req, res, next) {
   try {
     const rows = await integrationService.getCalendarEvents(req.user.userId);
     return res.status(200).json(rows);
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function syncGoogleCalendar(req, res, next) {
+  try {
+    const daysBack = req.body?.daysBack ?? req.query?.daysBack ?? 7;
+    const daysForward = req.body?.daysForward ?? req.query?.daysForward ?? 180;
+    const backNum = Number(daysBack);
+    const forwardNum = Number(daysForward);
+    const payload = await integrationService.syncGoogleCalendarEvents(req.user.userId, {
+      daysBack: Number.isFinite(backNum) ? backNum : 7,
+      daysForward: Number.isFinite(forwardNum) ? forwardNum : 180
+    });
+    return res.status(200).json(payload);
   } catch (error) {
     return next(error);
   }
@@ -216,6 +251,151 @@ async function parseGmail(req, res, next) {
   }
 }
 
+async function listGoogleTaskLists(req, res, next) {
+  try {
+    const accountId = req.query?.accountId || null;
+    const maxResults = req.query?.maxResults ?? 20;
+    const payload = await integrationService.listGoogleTaskLists(req.user.userId, { accountId, maxResults });
+    return res.status(200).json(payload);
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (message.toLowerCase().includes("not connected") || message.toLowerCase().includes("permission")) {
+      return res.status(400).json({ message });
+    }
+    return next(error);
+  }
+}
+
+async function listGoogleTasks(req, res, next) {
+  try {
+    const accountId = req.query?.accountId || null;
+    const taskListId = req.query?.taskListId || req.query?.tasklist || "@default";
+    const maxResults = req.query?.maxResults ?? 100;
+    const showCompleted = parseBooleanQuery(req.query?.showCompleted, false);
+    const showHidden = parseBooleanQuery(req.query?.showHidden, false);
+    const payload = await integrationService.listGoogleTasks(req.user.userId, {
+      accountId,
+      taskListId,
+      maxResults,
+      showCompleted,
+      showHidden
+    });
+    return res.status(200).json(payload);
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (message.toLowerCase().includes("not connected") || message.toLowerCase().includes("permission")) {
+      return res.status(400).json({ message });
+    }
+    return next(error);
+  }
+}
+
+async function createGoogleTask(req, res, next) {
+  try {
+    const { accountId = null, taskListId = "@default", title, notes = null, due = null } = req.body || {};
+    if (!String(title || "").trim()) {
+      return res.status(400).json({ message: "title is required" });
+    }
+    const payload = await integrationService.createGoogleTask(req.user.userId, {
+      accountId,
+      taskListId,
+      title,
+      notes,
+      due
+    });
+    return res.status(201).json(payload);
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (
+      message.toLowerCase().includes("required")
+      || message.toLowerCase().includes("not connected")
+      || message.toLowerCase().includes("permission")
+      || message.toLowerCase().includes("must be a valid date")
+    ) {
+      return res.status(400).json({ message });
+    }
+    return next(error);
+  }
+}
+
+async function completeGoogleTask(req, res, next) {
+  try {
+    const taskId = String(req.params?.taskId || "").trim();
+    if (!taskId) {
+      return res.status(400).json({ message: "taskId is required" });
+    }
+    const { accountId = null, taskListId = "@default" } = req.body || {};
+    const payload = await integrationService.completeGoogleTask(req.user.userId, {
+      accountId,
+      taskListId,
+      taskId
+    });
+    return res.status(200).json(payload);
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (
+      message.toLowerCase().includes("required")
+      || message.toLowerCase().includes("not connected")
+      || message.toLowerCase().includes("permission")
+    ) {
+      return res.status(400).json({ message });
+    }
+    if (message.toLowerCase().includes("not found")) {
+      return res.status(404).json({ message });
+    }
+    return next(error);
+  }
+}
+
+async function syncPlannerToGoogleTasks(req, res, next) {
+  try {
+    const { accountId = null, taskListId = "@default", items = [] } = req.body || {};
+    if (!Array.isArray(items)) {
+      return res.status(400).json({ message: "items must be an array" });
+    }
+    const payload = await integrationService.syncPlannerToGoogleTasks(req.user.userId, {
+      accountId,
+      taskListId,
+      items
+    });
+    return res.status(200).json(payload);
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (
+      message.toLowerCase().includes("not connected")
+      || message.toLowerCase().includes("permission")
+    ) {
+      return res.status(400).json({ message });
+    }
+    return next(error);
+  }
+}
+
+async function exportPlannerToGoogleDoc(req, res, next) {
+  try {
+    const { accountId = null, title = null, items = [] } = req.body || {};
+    if (!Array.isArray(items)) {
+      return res.status(400).json({ message: "items must be an array" });
+    }
+    const payload = await integrationService.createPlannerGoogleDoc(req.user.userId, {
+      accountId,
+      title,
+      items
+    });
+    return res.status(201).json(payload);
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (
+      message.toLowerCase().includes("not connected")
+      || message.toLowerCase().includes("permission")
+      || message.toLowerCase().includes("failed")
+    ) {
+      return res.status(400).json({ message });
+    }
+    return next(error);
+  }
+}
+
 async function pushWorkoutToFit(req, res, next) {
   try {
     const { sessionId } = req.body;
@@ -253,18 +433,60 @@ async function connectAcademia(req, res, next) {
   }
 }
 
+async function captureAcademiaSession(req, res, next) {
+  try {
+    const result = await integrationService.captureAcademiaSession(req.user.userId);
+    return res.status(200).json(result);
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (message.toLowerCase().includes("not connected")) {
+      return res.status(400).json({ message });
+    }
+    return next(error);
+  }
+}
+
 async function syncAcademia(req, res, next) {
   try {
     const result = await integrationService.syncAcademiaData(req.user.userId);
     return res.status(200).json(result);
   } catch (error) {
+    const syncState = String(error?.syncState || "").trim() || null;
     if (
+      syncState
+      || (
       String(error.message || "").includes("not connected")
       || String(error.message || "").includes("failed")
       || String(error.message || "").includes("Unable to fetch")
+      || String(error.message || "").toLowerCase().includes("must include")
       || String(error.message || "").toLowerCase().includes("captcha")
+      || String(error.message || "").toLowerCase().includes("manual action")
+      )
     ) {
-      return res.status(400).json({ message: error.message });
+      return res.status(400).json({ message: error.message, syncState });
+    }
+    return next(error);
+  }
+}
+
+async function syncAcademiaReports(req, res, next) {
+  try {
+    const result = await integrationService.syncAcademiaReportsData(req.user.userId);
+    return res.status(200).json(result);
+  } catch (error) {
+    const syncState = String(error?.syncState || "").trim() || null;
+    if (
+      syncState
+      || (
+        String(error.message || "").includes("not connected")
+        || String(error.message || "").includes("failed")
+        || String(error.message || "").includes("Unable to fetch")
+        || String(error.message || "").toLowerCase().includes("must include")
+        || String(error.message || "").toLowerCase().includes("captcha")
+        || String(error.message || "").toLowerCase().includes("manual action")
+      )
+    ) {
+      return res.status(400).json({ message: error.message, syncState });
     }
     return next(error);
   }
@@ -288,21 +510,71 @@ async function getAcademiaData(req, res, next) {
   }
 }
 
+async function listAcademicSources(req, res, next) {
+  try {
+    const rows = await integrationService.listAcademicSources(req.user.userId);
+    return res.status(200).json(rows);
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function registerAcademicSource(req, res, next) {
+  try {
+    const payload = await integrationService.registerAcademicSource(req.user.userId, req.body || {});
+    return res.status(201).json(payload);
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (message.toLowerCase().includes("required") || message.toLowerCase().includes("must be")) {
+      return res.status(400).json({ message });
+    }
+    return next(error);
+  }
+}
+
+async function removeAcademicSource(req, res, next) {
+  try {
+    const payload = await integrationService.removeAcademicSource(req.user.userId, req.params?.enrollmentId);
+    return res.status(200).json(payload);
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (message.toLowerCase().includes("required")) {
+      return res.status(400).json({ message });
+    }
+    if (message.toLowerCase().includes("not found")) {
+      return res.status(404).json({ message });
+    }
+    return next(error);
+  }
+}
+
 module.exports = {
   getGoogleAuthUrl,
   handleGoogleCallback,
   handleGoogleCallbackPublic,
   createCalendarEvent,
   listCalendarEvents,
+  syncGoogleCalendar,
   getIntegrationStatus,
   listGoogleAccounts,
   setPrimaryGoogleAccount,
   setFitGoogleAccount,
   disconnectGoogleAccount,
   parseGmail,
+  listGoogleTaskLists,
+  listGoogleTasks,
+  createGoogleTask,
+  completeGoogleTask,
+  syncPlannerToGoogleTasks,
+  exportPlannerToGoogleDoc,
   pushWorkoutToFit,
   connectAcademia,
+  captureAcademiaSession,
   syncAcademia,
+  syncAcademiaReports,
   getAcademiaStatus,
-  getAcademiaData
+  getAcademiaData,
+  listAcademicSources,
+  registerAcademicSource,
+  removeAcademicSource
 };

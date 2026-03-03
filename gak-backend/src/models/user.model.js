@@ -2,6 +2,21 @@ const pool = require("../config/db");
 
 const OPTIONAL_TABLE_ERRORS = new Set(["ER_NO_SUCH_TABLE", "ER_BAD_FIELD_ERROR"]);
 
+async function queryWithOptionalProfileImage(sqlWithProfileImage, sqlWithoutProfileImage, params = []) {
+  try {
+    return await pool.execute(sqlWithProfileImage, params);
+  } catch (error) {
+    if (error && error.code === "ER_BAD_FIELD_ERROR") {
+      const [fallbackRows] = await pool.execute(sqlWithoutProfileImage, params);
+      const rows = Array.isArray(fallbackRows)
+        ? fallbackRows.map((row) => ({ ...row, profile_image_url: null }))
+        : [];
+      return [rows];
+    }
+    throw error;
+  }
+}
+
 async function safeExecute(connection, sql, params = []) {
   try {
     return await connection.execute(sql, params);
@@ -19,7 +34,10 @@ async function safeRows(connection, sql, params = []) {
 }
 
 async function findByEmail(email) {
-  const [rows] = await pool.execute(
+  const [rows] = await queryWithOptionalProfileImage(
+    `SELECT user_id, full_name, email, password_hash, profile_image_url, created_at
+     FROM app_user
+     WHERE LOWER(email) = LOWER(?)`,
     `SELECT user_id, full_name, email, password_hash, created_at
      FROM app_user
      WHERE LOWER(email) = LOWER(?)`,
@@ -40,7 +58,10 @@ async function createUser({ userId, fullName, email, passwordHash }) {
 }
 
 async function findById(userId) {
-  const [rows] = await pool.execute(
+  const [rows] = await queryWithOptionalProfileImage(
+    `SELECT user_id, full_name, email, profile_image_url, created_at
+     FROM app_user
+     WHERE user_id = ?`,
     `SELECT user_id, full_name, email, created_at
      FROM app_user
      WHERE user_id = ?`,
@@ -51,7 +72,10 @@ async function findById(userId) {
 }
 
 async function findAuthById(userId) {
-  const [rows] = await pool.execute(
+  const [rows] = await queryWithOptionalProfileImage(
+    `SELECT user_id, email, password_hash, profile_image_url
+     FROM app_user
+     WHERE user_id = ?`,
     `SELECT user_id, email, password_hash
      FROM app_user
      WHERE user_id = ?`,
@@ -59,6 +83,25 @@ async function findAuthById(userId) {
   );
 
   return rows[0] || null;
+}
+
+async function updateProfileImageUrl(userId, profileImageUrl) {
+  try {
+    await pool.execute(
+      `UPDATE app_user
+       SET profile_image_url = ?
+       WHERE user_id = ?`,
+      [profileImageUrl || null, userId]
+    );
+  } catch (error) {
+    if (error && error.code === "ER_BAD_FIELD_ERROR") {
+      const schemaError = new Error("Database schema is missing profile_image_url. Run sql/12_profile_photo.sql");
+      schemaError.code = "ER_SCHEMA_MISSING_PROFILE_IMAGE";
+      throw schemaError;
+    }
+    throw error;
+  }
+  return findById(userId);
 }
 
 async function exportUserData(userId) {
@@ -89,9 +132,10 @@ async function exportUserData(userId) {
       academiaAccount,
       academiaTimetable,
       academiaMarks,
-      academiaAttendance
+      academiaAttendance,
+      academicEnrollments
     ] = await Promise.all([
-      safeRows(connection, `SELECT user_id, full_name, email, created_at FROM app_user WHERE user_id = ?`, [userId]),
+      safeRows(connection, `SELECT user_id, full_name, email, profile_image_url, created_at FROM app_user WHERE user_id = ?`, [userId]),
       safeRows(connection, `SELECT * FROM academic_profile WHERE user_id = ?`, [userId]),
       safeRows(connection, `SELECT * FROM attendance_record WHERE user_id = ? ORDER BY class_date DESC`, [userId]),
       safeRows(connection, `SELECT * FROM marks_record WHERE user_id = ? ORDER BY recorded_at DESC`, [userId]),
@@ -136,9 +180,57 @@ async function exportUserData(userId) {
       safeRows(connection, `SELECT * FROM user_recommendations WHERE user_id = ? ORDER BY generated_at DESC`, [userId]),
       safeRows(connection, `SELECT * FROM fit_daily_metric WHERE user_id = ? ORDER BY metric_date DESC`, [userId]),
       safeRows(connection, `SELECT * FROM academia_account WHERE user_id = ?`, [userId]),
-      safeRows(connection, `SELECT * FROM academia_timetable_cache WHERE user_id = ?`, [userId]),
-      safeRows(connection, `SELECT * FROM academia_marks_cache WHERE user_id = ?`, [userId]),
-      safeRows(connection, `SELECT * FROM academia_attendance_cache WHERE user_id = ?`, [userId])
+      safeRows(
+        connection,
+        `SELECT
+          t.timetable_entry_id AS id,
+          t.day_order,
+          NULL AS day_label,
+          t.start_time,
+          t.end_time,
+          s.subject_name,
+          f.faculty_name,
+          c.room_number AS room_label
+         FROM academic_profile ap
+         JOIN timetable_entry t ON t.section_id = ap.section_id
+         JOIN subject s ON s.subject_id = t.subject_id
+         LEFT JOIN faculty f ON f.faculty_id = t.faculty_id
+         LEFT JOIN classroom c ON c.classroom_id = t.classroom_id
+         WHERE ap.user_id = ?
+         ORDER BY COALESCE(t.day_order, 99), t.start_time, s.subject_name`,
+        [userId]
+      ),
+      safeRows(
+        connection,
+        `SELECT
+          m.marks_id AS id,
+          s.subject_name,
+          m.component_type AS component_name,
+          m.score,
+          m.max_score,
+          ROUND((m.score / NULLIF(m.max_score, 0)) * 100, 2) AS percentage
+         FROM marks_record m
+         JOIN subject s ON s.subject_id = m.subject_id
+         WHERE m.user_id = ?
+         ORDER BY s.subject_name ASC, m.recorded_at DESC`,
+        [userId]
+      ),
+      safeRows(
+        connection,
+        `SELECT
+          CONCAT('att_', s.subject_id) AS id,
+          s.subject_name,
+          SUM(a.attended) AS attended_classes,
+          COUNT(*) AS total_classes,
+          ROUND((SUM(a.attended) / NULLIF(COUNT(*), 0)) * 100, 2) AS attendance_percentage
+         FROM attendance_record a
+         JOIN subject s ON s.subject_id = a.subject_id
+         WHERE a.user_id = ?
+         GROUP BY s.subject_id, s.subject_name
+         ORDER BY s.subject_name ASC`,
+        [userId]
+      ),
+      safeRows(connection, `SELECT * FROM academic_enrollment WHERE user_id = ? ORDER BY updated_at DESC`, [userId])
     ]);
 
     return {
@@ -169,7 +261,8 @@ async function exportUserData(userId) {
         academiaAccount,
         academiaTimetable,
         academiaMarks,
-        academiaAttendance
+        academiaAttendance,
+        academicEnrollments
       }
     };
   } finally {
@@ -220,10 +313,8 @@ async function deleteUserData(userId) {
     await safeExecute(connection, `DELETE FROM academic_behavior_metrics WHERE user_id = ?`, [userId]);
     await safeExecute(connection, `DELETE FROM nutrition_behavior_metrics WHERE user_id = ?`, [userId]);
 
-    await safeExecute(connection, `DELETE FROM academia_timetable_cache WHERE user_id = ?`, [userId]);
-    await safeExecute(connection, `DELETE FROM academia_marks_cache WHERE user_id = ?`, [userId]);
-    await safeExecute(connection, `DELETE FROM academia_attendance_cache WHERE user_id = ?`, [userId]);
     await safeExecute(connection, `DELETE FROM academia_account WHERE user_id = ?`, [userId]);
+    await safeExecute(connection, `DELETE FROM academic_enrollment WHERE user_id = ?`, [userId]);
 
     await safeExecute(connection, `DELETE FROM fit_daily_metric WHERE user_id = ?`, [userId]);
     await safeExecute(connection, `DELETE FROM email_event WHERE user_id = ?`, [userId]);
@@ -254,6 +345,7 @@ module.exports = {
   createUser,
   findById,
   findAuthById,
+  updateProfileImageUrl,
   exportUserData,
   deleteUserData
 };

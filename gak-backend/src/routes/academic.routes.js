@@ -6,6 +6,7 @@ const router = express.Router();
 
 router.get("/subjects", academicController.getSubjects);
 router.get("/timetable/:userId", academicController.getTimetable);
+router.get("/day-order/:userId", academicController.getCurrentDayOrder);
 router.post("/attendance", academicController.postAttendance);
 router.get("/attendance/summary/:userId", academicController.getAttendanceSummary);
 router.post("/marks", academicController.postMarks);

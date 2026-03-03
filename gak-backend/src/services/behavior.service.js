@@ -1,6 +1,5 @@
-const { randomUUID } = require("crypto");
-
 const behaviorModel = require("../models/behavior.model");
+const { createId } = require("../utils/id.util");
 
 function isExamWeek(date) {
   const month = new Date(date).getMonth() + 1;
@@ -11,7 +10,7 @@ async function logBehavior({ userId, domain, entityId, action, timestamp = new D
   const t = new Date(timestamp);
 
   await behaviorModel.insertBehaviorLog({
-    id: randomUUID(),
+    id: createId("beh"),
     userId,
     domain,
     entityId,

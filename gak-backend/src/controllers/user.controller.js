@@ -1,14 +1,32 @@
-const { randomUUID } = require("crypto");
 const bcrypt = require("bcryptjs");
+const path = require("path");
+const fs = require("fs/promises");
 
 const userModel = require("../models/user.model");
 const { signAuthToken } = require("../utils/jwt.util");
+const { createId } = require("../utils/id.util");
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function isStrongPassword(password) {
   const value = String(password || "");
   return value.length >= 8 && /[A-Za-z]/.test(value) && /\d/.test(value);
+}
+
+function buildPublicUploadUrl(...parts) {
+  return `/${["uploads", ...parts].map((v) => String(v || "").replace(/^\/+|\/+$/g, "")).join("/")}`;
+}
+
+async function deleteLocalProfilePhotoIfPresent(rawUrl) {
+  const value = String(rawUrl || "").trim();
+  if (!value.startsWith("/uploads/profile-photos/")) return;
+  const relative = value.replace(/^\/+/, "");
+  const absPath = path.join(__dirname, "..", "..", relative);
+  try {
+    await fs.unlink(absPath);
+  } catch (_error) {
+    // Ignore missing/locked files and keep profile update successful.
+  }
 }
 
 async function register(req, res, next) {
@@ -42,7 +60,7 @@ async function register(req, res, next) {
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
-    const userId = randomUUID();
+    const userId = createId("usr");
 
     await userModel.createUser({
       userId,
@@ -53,9 +71,12 @@ async function register(req, res, next) {
 
     return res.status(201).json({
       message: "User created",
-      user: { userId, fullName, email }
+      user: { userId, fullName, email, profileImageUrl: null }
     });
   } catch (error) {
+    if (error && error.code === "ER_SCHEMA_MISSING_PROFILE_IMAGE") {
+      return res.status(400).json({ message: error.message });
+    }
     return next(error);
   }
 }
@@ -88,7 +109,8 @@ async function login(req, res, next) {
       user: {
         userId: user.user_id,
         fullName: user.full_name,
-        email: user.email
+        email: user.email,
+        profileImageUrl: user.profile_image_url || null
       }
     });
   } catch (error) {
@@ -106,6 +128,51 @@ async function getProfile(req, res, next) {
     }
 
     return res.status(200).json(user);
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function updateProfilePhoto(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const existing = await userModel.findById(userId);
+    if (!existing) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ message: "photo image file is required" });
+    }
+
+    const mime = String(req.file.mimetype || "").toLowerCase();
+    if (!/^image\/(jpeg|jpg|png|webp|gif)$/.test(mime)) {
+      return res.status(400).json({ message: "Only jpeg, png, webp, or gif images are supported" });
+    }
+
+    const extension = mime.includes("png")
+      ? "png"
+      : mime.includes("webp")
+        ? "webp"
+        : mime.includes("gif")
+          ? "gif"
+          : "jpg";
+
+    const uploadsRoot = path.join(__dirname, "..", "..", "uploads", "profile-photos", userId);
+    await fs.mkdir(uploadsRoot, { recursive: true });
+
+    const fileName = `${Date.now()}-${createId("pp")}.${extension}`;
+    const absPath = path.join(uploadsRoot, fileName);
+    await fs.writeFile(absPath, req.file.buffer);
+
+    const publicUrl = buildPublicUploadUrl("profile-photos", userId, fileName);
+    const updated = await userModel.updateProfileImageUrl(userId, publicUrl);
+    await deleteLocalProfilePhotoIfPresent(existing.profile_image_url);
+
+    return res.status(200).json({
+      message: "Profile photo updated",
+      profile: updated
+    });
   } catch (error) {
     return next(error);
   }
@@ -150,6 +217,7 @@ module.exports = {
   register,
   login,
   getProfile,
+  updateProfilePhoto,
   exportMyData,
   deleteMyAccount
 };
