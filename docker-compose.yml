@@ -1,4 +1,11 @@
 services:
+  redis:
+    image: redis:7.2
+    container_name: gak-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
   mysql:
     image: mysql:8.4
     container_name: gak-mysql
@@ -18,6 +25,7 @@ services:
     container_name: gak-backend
     restart: unless-stopped
     depends_on:
+      - redis
       - mysql
     env_file:
       - ./gak-backend/.env.production.example
@@ -28,8 +36,31 @@ services:
       DB_PASSWORD: root
       DB_NAME: GAK
       HOST: 0.0.0.0
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
     ports:
       - "4000:4000"
+
+  worker:
+    build:
+      context: ./gak-backend
+      dockerfile: Dockerfile
+    container_name: gak-worker
+    restart: unless-stopped
+    command: ["node", "worker.js"]
+    depends_on:
+      - redis
+      - mysql
+    env_file:
+      - ./gak-backend/.env.production.example
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: root
+      DB_NAME: GAK
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
 
   frontend:
     build:

@@ -7,6 +7,7 @@ const SENSITIVE_QUERY_KEYS = new Set([
   "password",
   "secret"
 ]);
+const logger = require("../observability/logger");
 
 function sanitizePathWithQuery(originalUrl) {
   try {
@@ -28,18 +29,24 @@ function auditMiddleware(req, res, next) {
   const safePath = sanitizePathWithQuery(req.originalUrl);
 
   res.on("finish", () => {
+    const durationMs = Date.now() - startedAt;
     const payload = {
-      type: "audit",
-      ts: new Date().toISOString(),
+      request_id: req.requestId || null,
+      user_id: req.user?.userId || null,
       method: req.method,
-      path: safePath,
+      route: safePath,
       status: res.statusCode,
-      durationMs: Date.now() - startedAt,
-      userId: req.user?.userId || null,
-      ip: req.ip || null
+      latency_ms: durationMs,
+      duration_ms: durationMs,
+      source: "api",
+      error_code: res.statusCode >= 400 ? "http_error" : null
     };
 
-    console.log(JSON.stringify(payload));
+    if (res.statusCode >= 500) {
+      logger.error(payload, "api_request");
+      return;
+    }
+    logger.info(payload, "api_request");
   });
 
   next();

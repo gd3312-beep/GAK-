@@ -7,8 +7,12 @@ const path = require("path");
 
 dotenv.config();
 
+const logger = require("./observability/logger");
+const { exposeMetrics } = require("./observability/metrics");
 const { assertJwtSecretsForRuntime } = require("./utils/jwt.util");
 const { assertSecurityRuntimeConfig } = require("./utils/security.util");
+const requestContextMiddleware = require("./middleware/request-context.middleware");
+const metricsMiddleware = require("./middleware/metrics.middleware");
 const auditMiddleware = require("./middleware/audit.middleware");
 const authMiddleware = require("./middleware/auth.middleware");
 const userRoutes = require("./routes/user.routes");
@@ -94,6 +98,8 @@ app.use(
 // Security middleware should be installed before routes to cover all endpoints.
 app.use(helmet());
 app.use(express.json({ limit: "1mb" }));
+app.use(requestContextMiddleware);
+app.use(metricsMiddleware);
 app.use(auditMiddleware);
 
 app.use((req, res, next) => {
@@ -129,6 +135,7 @@ app.use(
 app.get("/health", (_req, res) => {
   res.json({ ok: true, module: "dbms-backend" });
 });
+app.get("/metrics", exposeMetrics);
 app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 
 app.get(
@@ -153,7 +160,18 @@ app.use("/api/history", authMiddleware, historyRoutes);
 app.use("/api/jobs", authMiddleware, jobsRoutes);
 
 app.use((err, _req, res, _next) => {
-  console.error(err);
+  logger.error(
+    {
+      request_id: _req?.requestId || null,
+      user_id: _req?.user?.userId || null,
+      method: _req?.method || null,
+      route: _req?.originalUrl || null,
+      status: 500,
+      error_code: err?.code || "internal_error",
+      message: String(err?.message || err)
+    },
+    "api_error"
+  );
   if (String(err.message || "").includes("CORS origin blocked")) {
     return res.status(403).json({ message: "CORS origin blocked" });
   }

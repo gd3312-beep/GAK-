@@ -1,0 +1,89 @@
+services:
+  - type: web
+    name: gak-backend
+    runtime: node
+    plan: free
+    rootDir: gak-backend
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: 10000
+      - key: ENFORCE_HTTPS
+        value: true
+      - key: NUTRITION_ANALYSIS_MODE
+        value: dummy
+      - key: ENABLE_JOBS
+        value: false
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        value: 4000
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: DB_NAME
+        value: GAK
+      - key: DB_SSL_MODE
+        value: required
+      - key: DB_SSL_REJECT_UNAUTHORIZED
+        value: true
+      - key: JWT_SECRET
+        generateValue: true
+      - key: OAUTH_STATE_SECRET
+        generateValue: true
+      - key: TOKEN_ENCRYPTION_KEYS
+        sync: false
+      - key: JWT_EXPIRES_IN
+        value: 12h
+      - key: JWT_ENFORCE_CLAIMS
+        value: true
+      - key: JWT_ISSUER
+        value: gak-backend
+      - key: JWT_AUDIENCE
+        value: gak-client
+      - key: FRONTEND_URL
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: FRONTEND_ALLOWED_REDIRECTS
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        sync: false
+      - key: GOOGLE_ALLOWED_REDIRECT_URIS
+        sync: false
+      - key: GOOGLE_OAUTH_SCOPES
+        value: openid,email,profile,https://www.googleapis.com/auth/calendar.events,https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/fitness.activity.read,https://www.googleapis.com/auth/fitness.activity.write,https://www.googleapis.com/auth/fitness.body.read
+      - key: JOBS_ADMIN_TOKEN
+        generateValue: true
+  - type: static_site
+    name: gak-frontend
+    plan: free
+    rootDir: Frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    pullRequestPreviewsEnabled: true
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: VITE_API_URL
+        sync: false
+      - key: VITE_API_PORT
+        value: 443

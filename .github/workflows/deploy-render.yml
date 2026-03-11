@@ -1,0 +1,53 @@
+name: Deploy Render
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+jobs:
+  deploy-staging:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'develop'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger staging backend deploy
+        env:
+          HOOK: ${{ secrets.RENDER_STAGING_BACKEND_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "RENDER_STAGING_BACKEND_DEPLOY_HOOK not set; skipping backend deploy."
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK"
+      - name: Trigger staging frontend deploy
+        env:
+          HOOK: ${{ secrets.RENDER_STAGING_FRONTEND_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "RENDER_STAGING_FRONTEND_DEPLOY_HOOK not set; skipping frontend deploy."
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK"
+
+  deploy-production:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger production backend deploy
+        env:
+          HOOK: ${{ secrets.RENDER_PROD_BACKEND_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "RENDER_PROD_BACKEND_DEPLOY_HOOK not set; skipping backend deploy."
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK"
+      - name: Trigger production frontend deploy
+        env:
+          HOOK: ${{ secrets.RENDER_PROD_FRONTEND_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "RENDER_PROD_FRONTEND_DEPLOY_HOOK not set; skipping frontend deploy."
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK"

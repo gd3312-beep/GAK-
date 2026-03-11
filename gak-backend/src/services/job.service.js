@@ -20,19 +20,32 @@ async function runTokenRefreshJob() {
   return integrationService.refreshGoogleTokensJob();
 }
 
-async function runGmailSyncJob() {
-  const accounts = await integrationModel.listGoogleAccountsWithRefreshToken();
-  const users = [...new Set(accounts.map((row) => row.user_id))];
+async function runGmailSyncJob(options = {}) {
+  const requestedUserId = options?.userId ? String(options.userId) : null;
+  const accounts = requestedUserId
+    ? [{ user_id: requestedUserId }]
+    : await integrationModel.listGoogleAccountsWithRefreshToken();
+  const users = [...new Set(accounts.map((row) => row.user_id).filter(Boolean))];
   let processedUsers = 0;
   let totalEmails = 0;
+  let failedUsers = 0;
 
   for (const userId of users) {
-    const result = await integrationService.parseGmailForAcademicEvents(userId);
-    processedUsers += 1;
-    totalEmails += Number(result.processed || 0);
+    try {
+      const result = await integrationService.parseGmailForAcademicEvents(userId);
+      processedUsers += 1;
+      totalEmails += Number(result.processed || 0);
+    } catch (_error) {
+      failedUsers += 1;
+    }
   }
 
-  return { processedUsers, totalEmails };
+  return {
+    provider: "gmail",
+    processedUsers,
+    records_ingested: totalEmails,
+    records_failed: failedUsers
+  };
 }
 
 async function runCalendarSyncJob() {
@@ -40,12 +53,35 @@ async function runCalendarSyncJob() {
 }
 
 async function runMetricsRecomputeJob() {
+  const startedAt = Date.now();
   const metrics = await behaviorService.recomputeAllDomainMetrics();
   const summaries = await recommendationService.recomputeAllBehaviorSummaries();
 
   return {
     metrics,
-    summaries
+    summaries,
+    recompute_duration_ms: Date.now() - startedAt,
+    users_processed: Number(summaries?.usersProcessed || metrics?.usersProcessed || 0),
+    stale_data_count: 0
+  };
+}
+
+async function runUserMetricsRecomputeJob(options = {}) {
+  const userId = options?.userId ? String(options.userId) : null;
+  if (!userId) {
+    throw new Error("userId is required");
+  }
+  const startedAt = Date.now();
+  await behaviorService.recomputeFitnessMetrics(userId);
+  await behaviorService.recomputeAcademicMetrics(userId);
+  await behaviorService.recomputeNutritionMetrics(userId);
+  const summary = await recommendationService.recomputeBehaviorSummary(userId);
+  return {
+    userId,
+    recompute_duration_ms: Date.now() - startedAt,
+    users_processed: 1,
+    stale_data_count: 0,
+    summary
   };
 }
 
@@ -66,8 +102,9 @@ async function runOAuthNonceCleanupJob() {
   return { deleted };
 }
 
-async function runAcademiaMarksAttendanceSyncJob() {
-  const users = await integrationModel.listUsersWithConnectedAcademia();
+async function runAcademiaMarksAttendanceSyncJob(options = {}) {
+  const requestedUserId = options?.userId ? String(options.userId) : null;
+  const users = requestedUserId ? [requestedUserId] : await integrationModel.listUsersWithConnectedAcademia();
   let processedUsers = 0;
   let successUsers = 0;
   let failedUsers = 0;
@@ -83,14 +120,18 @@ async function runAcademiaMarksAttendanceSyncJob() {
   }
 
   return {
+    provider: "academia",
     processedUsers,
     successUsers,
-    failedUsers
+    failedUsers,
+    records_ingested: successUsers,
+    records_failed: failedUsers
   };
 }
 
-async function runAcademiaReportsSyncJob() {
-  const users = await integrationModel.listUsersWithConnectedAcademia();
+async function runAcademiaReportsSyncJob(options = {}) {
+  const requestedUserId = options?.userId ? String(options.userId) : null;
+  const users = requestedUserId ? [requestedUserId] : await integrationModel.listUsersWithConnectedAcademia();
   let processedUsers = 0;
   let successUsers = 0;
   let failedUsers = 0;
@@ -106,14 +147,20 @@ async function runAcademiaReportsSyncJob() {
   }
 
   return {
+    provider: "academia",
     processedUsers,
     successUsers,
-    failedUsers
+    failedUsers,
+    records_ingested: successUsers,
+    records_failed: failedUsers
   };
 }
 
-async function runFitnessSyncJob() {
-  const users = await integrationModel.listUsersWithRefreshToken();
+async function runFitnessSyncJob(options = {}) {
+  const requestedUserId = options?.userId ? String(options.userId) : null;
+  const users = requestedUserId
+    ? [{ user_id: requestedUserId }]
+    : await integrationModel.listUsersWithRefreshToken();
   const todayIst = getIstDateOnly(0);
   const yesterdayIst = getIstDateOnly(-1);
   const includeYesterday = String(process.env.FIT_SYNC_INCLUDE_YESTERDAY || "true").toLowerCase() !== "false";
@@ -180,6 +227,7 @@ async function runFitnessSyncJob() {
   }
 
   return {
+    provider: "google_fit",
     processedUsers,
     successUsers,
     failedUsers,
@@ -187,6 +235,8 @@ async function runFitnessSyncJob() {
     todayIst,
     yesterdayIst: includeYesterday ? yesterdayIst : null,
     includeYesterday,
+    records_ingested: dailyRowsSynced + bodyRowsSynced,
+    records_failed: failedUsers,
     dailyRowsSynced,
     bodyRowsSynced,
     reasons
@@ -212,6 +262,7 @@ module.exports = {
   runGmailSyncJob,
   runCalendarSyncJob,
   runMetricsRecomputeJob,
+  runUserMetricsRecomputeJob,
   runAcademicCleanupJob,
   runOAuthNonceCleanupJob,
   runFitnessSyncJob,

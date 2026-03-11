@@ -1,6 +1,6 @@
 const cron = require("node-cron");
-
-const jobService = require("../services/job.service");
+const { enqueueJob } = require("../queue/producer");
+const { JOB_TYPES } = require("../queue/job-types");
 
 function wrapJob(name, fn) {
   return async () => {
@@ -65,55 +65,55 @@ function bootstrapScheduler() {
   registerCron(
     "gmail-sync",
     readCron("CRON_GMAIL_SYNC", "*/10 * * * *"),
-    jobService.runGmailSyncJob
+    () => enqueueJob(JOB_TYPES.GMAIL_SYNC, { source: "cron" })
   );
 
   registerCron(
     "token-refresh",
     readCron("CRON_TOKEN_REFRESH", "0 * * * *"),
-    jobService.runTokenRefreshJob
+    () => enqueueJob(JOB_TYPES.TOKEN_REFRESH, { source: "cron" })
   );
 
   registerCron(
     "calendar-sync",
     readCron("CRON_CALENDAR_SYNC", "15 * * * *"),
-    jobService.runCalendarSyncJob
+    () => enqueueJob(JOB_TYPES.CALENDAR_SYNC, { source: "cron" })
   );
 
   registerCron(
     "fitness-sync",
     readCron("CRON_FIT_SYNC", "*/20 * * * *"),
-    jobService.runFitnessSyncJob
+    () => enqueueJob(JOB_TYPES.FIT_SYNC, { source: "cron" })
   );
 
   registerCron(
     "academic-cleanup",
     readCron("CRON_ACADEMIC_CLEANUP", "5 * * * *"),
-    jobService.runAcademicCleanupJob
+    () => enqueueJob(JOB_TYPES.ACADEMIC_CLEANUP, { source: "cron" })
   );
 
   registerCron(
     "academia-marks-attendance-sync",
     readCron("CRON_ACADEMIA_MARKS_ATTENDANCE_SYNC", "*/30 * * * *"),
-    jobService.runAcademiaMarksAttendanceSyncJob
+    () => enqueueJob(JOB_TYPES.ACADEMIA_SYNC, { source: "cron" })
   );
 
   registerCron(
     "academia-reports-sync",
     readCron("CRON_ACADEMIA_REPORTS_SYNC", "30 3 * * *"),
-    jobService.runAcademiaReportsSyncJob
+    () => enqueueJob(JOB_TYPES.ACADEMIA_REPORTS_SYNC, { source: "cron" })
   );
 
   registerCron(
     "oauth-nonce-cleanup",
     readCron("CRON_OAUTH_NONCE_CLEANUP", "*/30 * * * *"),
-    jobService.runOAuthNonceCleanupJob
+    () => enqueueJob(JOB_TYPES.OAUTH_NONCE_CLEANUP, { source: "cron" })
   );
 
   registerCron(
     "metrics-recompute",
     readCron("CRON_METRICS_RECOMPUTE", "0 2 * * *"),
-    jobService.runMetricsRecomputeJob
+    () => enqueueJob(JOB_TYPES.METRICS_RECOMPUTE, { source: "cron" })
   );
 }
 

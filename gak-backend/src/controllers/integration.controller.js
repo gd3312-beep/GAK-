@@ -1,4 +1,6 @@
 const integrationService = require("../services/integration.service");
+const { enqueueJob } = require("../queue/producer");
+const { JOB_TYPES } = require("../queue/job-types");
 
 function isLocalHost(hostname) {
   return hostname === "localhost" || hostname === "127.0.0.1";
@@ -243,9 +245,14 @@ async function setFitGoogleAccount(req, res, next) {
 
 async function parseGmail(req, res, next) {
   try {
-    const accountId = req.body?.accountId || req.query?.accountId || null;
-    const result = await integrationService.parseGmailForAcademicEvents(req.user.userId, { accountId });
-    return res.status(200).json(result);
+    const idempotencyKey = req.body?.idempotencyKey || req.query?.idempotencyKey || null;
+    const result = await enqueueJob(JOB_TYPES.GMAIL_SYNC, {
+      userId: req.user.userId,
+      source: "api",
+      requestId: req.requestId,
+      idempotencyKey
+    });
+    return res.status(202).json({ enqueued: true, ...result });
   } catch (error) {
     return next(error);
   }
@@ -448,8 +455,14 @@ async function captureAcademiaSession(req, res, next) {
 
 async function syncAcademia(req, res, next) {
   try {
-    const result = await integrationService.syncAcademiaData(req.user.userId);
-    return res.status(200).json(result);
+    const idempotencyKey = req.body?.idempotencyKey || req.query?.idempotencyKey || null;
+    const result = await enqueueJob(JOB_TYPES.ACADEMIA_SYNC, {
+      userId: req.user.userId,
+      source: "api",
+      requestId: req.requestId,
+      idempotencyKey
+    });
+    return res.status(202).json({ enqueued: true, ...result });
   } catch (error) {
     const syncState = String(error?.syncState || "").trim() || null;
     if (
@@ -471,8 +484,14 @@ async function syncAcademia(req, res, next) {
 
 async function syncAcademiaReports(req, res, next) {
   try {
-    const result = await integrationService.syncAcademiaReportsData(req.user.userId);
-    return res.status(200).json(result);
+    const idempotencyKey = req.body?.idempotencyKey || req.query?.idempotencyKey || null;
+    const result = await enqueueJob(JOB_TYPES.ACADEMIA_REPORTS_SYNC, {
+      userId: req.user.userId,
+      source: "api",
+      requestId: req.requestId,
+      idempotencyKey
+    });
+    return res.status(202).json({ enqueued: true, ...result });
   } catch (error) {
     const syncState = String(error?.syncState || "").trim() || null;
     if (
