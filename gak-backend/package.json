@@ -5,7 +5,11 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "start:api": "node server.js",
+    "start:worker": "node worker.js",
     "dev": "nodemon server.js",
+    "dev:api": "nodemon server.js",
+    "dev:worker": "nodemon worker.js",
     "test": "sh -c 'files=$(find test -type f -name \"*.test.js\" 2>/dev/null); if [ -z \"$files\" ]; then echo \"No backend tests found\"; exit 0; fi; node --test $files'",
     "smoke:api": "node scripts/smoke-api.js",
     "db:bootstrap": "bash scripts/bootstrap-db.sh",
@@ -21,13 +25,18 @@
     "express-rate-limit": "^8.2.1",
     "googleapis": "^150.0.1",
     "helmet": "^8.1.0",
+    "ioredis": "^5.8.1",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.2",
     "mysql2": "^3.11.3",
     "node-cron": "^3.0.3",
     "openai": "^6.22.0",
     "pdf-parse": "^2.4.5",
-    "playwright": "^1.58.2"
+    "pino": "^10.1.0",
+    "pino-http": "^11.0.0",
+    "playwright": "^1.58.2",
+    "prom-client": "^15.1.3",
+    "bullmq": "^5.58.5"
   },
   "devDependencies": {
     "nodemon": "^3.1.7"

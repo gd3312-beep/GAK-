@@ -10,6 +10,7 @@ MYSQL_HOST="${MYSQL_HOST:-}"
 MYSQL_PORT="${MYSQL_PORT:-3306}"
 DB_NAME="${DB_NAME:-GAK}"
 DB_RESET="${DB_RESET:-false}"
+DB_INCLUDE_SAMPLE_DATA="${DB_INCLUDE_SAMPLE_DATA:-false}"
 DB_ALLOW_DESTRUCTIVE="${DB_ALLOW_DESTRUCTIVE:-false}"
 
 MYSQL_CMD=(mysql "-u${MYSQL_USER}")
@@ -35,6 +36,12 @@ CORE_SQL_FILES=(
   "sql/views.sql"
 )
 
+SAMPLE_SQL_FILES=(
+  "sql/03_sample_data.sql"
+  "sql/06_advanced_sample_data.sql"
+  "sql/04_run_demo_queries.sql"
+)
+
 echo "Applying SQL files to MySQL using user '${MYSQL_USER}'..."
 
 if [[ "${DB_RESET}" == "true" ]]; then
@@ -47,8 +54,10 @@ if [[ "${DB_RESET}" == "true" ]]; then
 fi
 
 SQL_FILES=("${CORE_SQL_FILES[@]}")
+if [[ "${DB_INCLUDE_SAMPLE_DATA}" == "true" ]]; then
+  SQL_FILES+=("${SAMPLE_SQL_FILES[@]}")
+fi
 
-# Apply schema in an explicit order so foreign keys/views remain valid.
 for sql_file in "${SQL_FILES[@]}"; do
   echo "-> ${sql_file}"
   "${MYSQL_CMD[@]}" < "${ROOT_DIR}/${sql_file}"

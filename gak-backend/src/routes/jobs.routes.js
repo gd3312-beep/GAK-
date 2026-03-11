@@ -34,5 +34,6 @@ router.post("/oauth-nonce-cleanup", jobsController.runOAuthNonceCleanup);
 router.post("/academia/marks-attendance-sync", jobsController.runAcademiaMarksAttendanceSync);
 router.post("/academia/reports-sync", jobsController.runAcademiaReportsSync);
 router.post("/run-all", jobsController.runAll);
+router.get("/:jobId", jobsController.getJobStatus);
 
 module.exports = router;

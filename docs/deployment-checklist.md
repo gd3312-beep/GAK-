@@ -12,6 +12,7 @@
 - Backend production env:
   - Copy `gak-backend/.env.production.example` to your deployment secret manager.
   - Set real values for DB, JWT, OAuth, CORS, and job token variables.
+  - For managed MySQL with TLS (for example TiDB), set `DB_SSL_MODE=required`.
 - Frontend production env:
   - Set `VITE_API_URL` to your backend public URL.
 

@@ -2,7 +2,7 @@
 
 This repository contains:
 - `Frontend`: React + Vite + TypeScript client.
-- `gak-backend`: Node.js + Express API server.
+- `gak-backend`: Node.js API service + worker service (BullMQ + Redis).
 - `database`: legacy SQL reference.
 
 ## Quick Start (Local)
@@ -11,9 +11,11 @@ This repository contains:
 3. Bootstrap schema:
    - `cd gak-backend`
    - `npm run db:bootstrap`
-4. Run backend:
-   - `npm run dev`
-5. Run frontend:
+4. Run backend API:
+   - `npm run dev:api`
+5. Run backend worker (separate terminal):
+   - `npm run dev:worker`
+6. Run frontend:
    - `cd ../Frontend`
    - `npm run dev`
 
@@ -36,3 +38,4 @@ This repository contains:
 Read detailed architecture and deployment notes in:
 - `docs/architecture-and-operations.md`
 - `docs/deployment-checklist.md`
+- `docs/free-deploy-runbook.md` (free-tier internet deployment with staging/production flow)
