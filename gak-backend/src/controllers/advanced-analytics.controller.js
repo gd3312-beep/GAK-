@@ -1,7 +1,18 @@
+const analyticsService = require("../services/analytics.service");
 const recommendationService = require("../services/recommendation.service");
 const { enqueueJob } = require("../queue/producer");
 const { JOB_TYPES } = require("../queue/job-types");
 const { keyBehaviorSummary, getJson, setJson } = require("../cache/cache.service");
+
+async function getCompactSnapshot(req, res, next) {
+  try {
+    const date = req.query?.date || new Date().toISOString().slice(0, 10);
+    const snapshot = await analyticsService.getCompactSnapshot(req.user.userId, date);
+    return res.status(200).json(snapshot);
+  } catch (error) {
+    return next(error);
+  }
+}
 
 async function getBehaviorSummary(req, res, next) {
   try {
@@ -35,6 +46,7 @@ async function recomputeForUser(req, res, next) {
 }
 
 module.exports = {
+  getCompactSnapshot,
   getBehaviorSummary,
   recomputeForUser
 };

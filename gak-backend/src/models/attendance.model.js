@@ -4,7 +4,23 @@ function isMissingView(error) {
   return String(error?.code || "") === "ER_NO_SUCH_TABLE";
 }
 
+function isMissingRoutine(error) {
+  return String(error?.code || "") === "ER_SP_DOES_NOT_EXIST";
+}
+
 async function createAttendanceRecord({ attendanceId, userId, subjectId, timetableEntryId, classDate, attended }) {
+  try {
+    await pool.query(
+      `CALL sp_safe_mark_attendance(?, ?, ?, ?, ?, ?)`,
+      [attendanceId, userId, subjectId, timetableEntryId, classDate, attended ? 1 : 0]
+    );
+    return;
+  } catch (error) {
+    if (!isMissingRoutine(error)) {
+      throw error;
+    }
+  }
+
   await pool.execute(
     `INSERT INTO attendance_record
       (attendance_id, user_id, subject_id, timetable_entry_id, class_date, attended)

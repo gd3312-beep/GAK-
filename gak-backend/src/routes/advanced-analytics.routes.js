@@ -4,6 +4,7 @@ const analyticsController = require("../controllers/advanced-analytics.controlle
 
 const router = express.Router();
 
+router.get("/compact-snapshot", analyticsController.getCompactSnapshot);
 router.get("/behavior-summary", analyticsController.getBehaviorSummary);
 router.post("/behavior-summary/recompute", analyticsController.recomputeForUser);
 

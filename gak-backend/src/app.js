@@ -19,14 +19,13 @@ const userRoutes = require("./routes/user.routes");
 const academicRoutes = require("./routes/academic.routes");
 const fitnessRoutes = require("./routes/fitness.routes");
 const nutritionRoutes = require("./routes/nutrition.routes");
-const integrationRoutes = require("./routes/integration.routes");
 const behaviorRoutes = require("./routes/behavior.routes");
 const advancedAnalyticsRoutes = require("./routes/advanced-analytics.routes");
 const historyRoutes = require("./routes/history.routes");
 const jobsRoutes = require("./routes/jobs.routes");
-const integrationController = require("./controllers/integration.controller");
 
 const app = express();
+const integrationsEnabled = String(process.env.ENABLE_INTEGRATIONS || "true").trim().toLowerCase() !== "false";
 
 app.disable("x-powered-by");
 assertJwtSecretsForRuntime();
@@ -71,6 +70,17 @@ function isPrivateDevOrigin(origin) {
   const value = normalizeOrigin(origin);
   if (!value) return false;
   return /^http:\/\/(?:localhost|127\.0\.0\.1|10(?:\.\d{1,3}){3}|192\.168(?:\.\d{1,3}){2}|172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2})(?::(?:8080|8081|5173))$/.test(value);
+}
+
+function shouldSkipDevRateLimit(req) {
+  if (isProduction) return false;
+  const path = String(req.path || "");
+  if (path === "/health") return true;
+  if (path.startsWith("/api/integrations/academia")) return true;
+  if (path.startsWith("/api/integrations/google")) return true;
+  if (path.startsWith("/api/users/me")) return true;
+  if (String(req.headers.authorization || "").startsWith("Bearer ")) return true;
+  return false;
 }
 
 app.use(
@@ -124,10 +134,10 @@ app.use((req, res, next) => {
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: isProduction ? 120 : 5000,
+    max: isProduction ? 120 : 50000,
     standardHeaders: true,
     legacyHeaders: false,
-    skip: (req) => req.path === "/health"
+    skip: (req) => shouldSkipDevRateLimit(req)
   })
 );
 
@@ -137,22 +147,29 @@ app.get("/health", (_req, res) => {
 app.get("/metrics", exposeMetrics);
 app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 
-app.get(
-  "/api/integrations/google/callback",
-  rateLimit({
-    windowMs: 10 * 60 * 1000,
-    max: isProduction ? 50 : 1000,
-    standardHeaders: true,
-    legacyHeaders: false
-  }),
-  integrationController.handleGoogleCallbackPublic
-);
+if (integrationsEnabled) {
+  const integrationController = require("./controllers/integration.controller");
+  app.get(
+    "/api/integrations/google/callback",
+    rateLimit({
+      windowMs: 10 * 60 * 1000,
+      max: isProduction ? 50 : 1000,
+      standardHeaders: true,
+      legacyHeaders: false,
+      skip: (req) => shouldSkipDevRateLimit(req)
+    }),
+    integrationController.handleGoogleCallbackPublic
+  );
+}
 
 app.use("/api/users", userRoutes);
 app.use("/api/academic", authMiddleware, academicRoutes);
 app.use("/api/fitness", authMiddleware, fitnessRoutes);
 app.use("/api/nutrition", authMiddleware, nutritionRoutes);
-app.use("/api/integrations", authMiddleware, integrationRoutes);
+if (integrationsEnabled) {
+  const integrationRoutes = require("./routes/integration.routes");
+  app.use("/api/integrations", authMiddleware, integrationRoutes);
+}
 app.use("/api/behavior", authMiddleware, behaviorRoutes);
 app.use("/api/advanced-analytics", authMiddleware, advancedAnalyticsRoutes);
 app.use("/api/history", authMiddleware, historyRoutes);

@@ -1,16 +1,30 @@
 const express = require("express");
-const multer = require("multer");
 
 const fitnessController = require("../controllers/fitness.controller");
 
 const router = express.Router();
 
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 }
-});
+let uploadMiddleware = null;
 
-router.post("/plan/upload", upload.single("file"), fitnessController.uploadWorkoutPlan);
+function resolveUploadMiddleware() {
+  if (uploadMiddleware) {
+    return uploadMiddleware;
+  }
+
+  try {
+    const multer = require("multer");
+    uploadMiddleware = multer({
+      storage: multer.memoryStorage(),
+      limits: { fileSize: 5 * 1024 * 1024 }
+    }).single("file");
+  } catch (error) {
+    uploadMiddleware = (_req, _res, next) => next(error);
+  }
+
+  return uploadMiddleware;
+}
+
+router.post("/plan/upload", (req, res, next) => resolveUploadMiddleware()(req, res, next), fitnessController.uploadWorkoutPlan);
 router.get("/plan/current", fitnessController.getCurrentWorkoutPlan);
 router.get("/workout/today", fitnessController.getTodayWorkoutPlan);
 router.post("/workout/today/action", fitnessController.setTodayWorkoutAction);

@@ -1,3 +1,4 @@
+const pool = require("../config/db");
 const workoutModel = require("../models/workout.model");
 const foodModel = require("../models/food.model");
 
@@ -49,7 +50,34 @@ async function getDailyNutritionSummary(userId, date) {
   };
 }
 
+async function getCompactSnapshot(userId, date) {
+  const snapshotDate = date || new Date().toISOString().slice(0, 10);
+  const [rows] = await pool.query(
+    `CALL sp_get_user_compact_snapshot(?, ?)`,
+    [userId, snapshotDate]
+  );
+
+  const firstResultSet = Array.isArray(rows) ? rows[0] : rows;
+  const row = Array.isArray(firstResultSet) ? firstResultSet[0] : firstResultSet;
+  const payload = row?.snapshot_payload ?? null;
+
+  if (!payload) {
+    return { userId, requestedDate: snapshotDate };
+  }
+
+  if (typeof payload === "string") {
+    try {
+      return JSON.parse(payload);
+    } catch (_error) {
+      return { userId, requestedDate: snapshotDate, rawPayload: payload };
+    }
+  }
+
+  return payload;
+}
+
 module.exports = {
   getFitnessSummary,
-  getDailyNutritionSummary
+  getDailyNutritionSummary,
+  getCompactSnapshot
 };

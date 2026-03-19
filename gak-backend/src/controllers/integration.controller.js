@@ -1,6 +1,7 @@
 const integrationService = require("../services/integration.service");
 const { enqueueJob } = require("../queue/producer");
 const { JOB_TYPES } = require("../queue/job-types");
+const { jobsEnabled } = require("../queue/queues");
 
 function isLocalHost(hostname) {
   return hostname === "localhost" || hostname === "127.0.0.1";
@@ -16,7 +17,7 @@ function normalizeFrontendBaseUrl(rawUrl) {
 }
 
 function getSafeFrontendBaseUrl() {
-  const configured = normalizeFrontendBaseUrl(process.env.FRONTEND_URL || "http://localhost:8080");
+  const configured = normalizeFrontendBaseUrl(process.env.FRONTEND_URL || "http://localhost:8081");
   const allowed = String(process.env.FRONTEND_ALLOWED_REDIRECTS || process.env.FRONTEND_URL || "")
     .split(",")
     .map((value) => normalizeFrontendBaseUrl(value))
@@ -36,7 +37,7 @@ function getSafeFrontendBaseUrl() {
     return allowed[0];
   }
 
-  return "http://localhost:8080";
+  return "http://localhost:8081";
 }
 
 function isOAuthConfigErrorMessage(message) {
@@ -54,6 +55,10 @@ function normalizeGooglePurpose(purpose) {
   if (!raw) return null;
   if (raw === "calendar_gmail" || raw === "fit" || raw === "all") return raw;
   return null;
+}
+
+function areJobsAvailable() {
+  return jobsEnabled();
 }
 
 async function getGoogleAuthUrl(req, res, next) {
@@ -237,6 +242,13 @@ async function setFitGoogleAccount(req, res, next) {
 
 async function parseGmail(req, res, next) {
   try {
+    if (!areJobsAvailable()) {
+      const payload = await integrationService.parseGmailForAcademicEvents(req.user.userId, {
+        accountId: req.body?.accountId || req.query?.accountId || null
+      });
+      return res.status(200).json({ enqueued: false, mode: "direct", ...payload });
+    }
+
     const idempotencyKey = req.body?.idempotencyKey || req.query?.idempotencyKey || null;
     const result = await enqueueJob(JOB_TYPES.GMAIL_SYNC, {
       userId: req.user.userId,
@@ -246,6 +258,111 @@ async function parseGmail(req, res, next) {
     });
     return res.status(202).json({ enqueued: true, ...result });
   } catch (error) {
+    return next(error);
+  }
+}
+
+async function listGoogleTaskLists(req, res, next) {
+  try {
+    const payload = await integrationService.listGoogleTaskLists(req.user.userId, {
+      accountId: req.query?.accountId || null
+    });
+    return res.status(200).json(payload);
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (message.toLowerCase().includes("permission") || message.toLowerCase().includes("reconnect")) {
+      return res.status(400).json({ message });
+    }
+    return next(error);
+  }
+}
+
+async function listGoogleTasks(req, res, next) {
+  try {
+    const payload = await integrationService.listGoogleTasks(req.user.userId, {
+      accountId: req.query?.accountId || null,
+      tasklistId: req.query?.tasklistId || req.query?.listId || null,
+      showCompleted: req.query?.showCompleted
+    });
+    return res.status(200).json(payload);
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (message.toLowerCase().includes("permission") || message.toLowerCase().includes("reconnect")) {
+      return res.status(400).json({ message });
+    }
+    return next(error);
+  }
+}
+
+async function createGoogleTask(req, res, next) {
+  try {
+    if (!req.body?.title) {
+      return res.status(400).json({ message: "title is required" });
+    }
+    const payload = await integrationService.createGoogleTask(req.user.userId, req.body || {});
+    return res.status(201).json(payload);
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (message.toLowerCase().includes("required") || message.toLowerCase().includes("permission") || message.toLowerCase().includes("reconnect")) {
+      return res.status(400).json({ message });
+    }
+    return next(error);
+  }
+}
+
+async function syncPlannerToGoogleTasks(req, res, next) {
+  try {
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    const payload = await integrationService.syncPlannerToGoogleTasks(req.user.userId, {
+      accountId: req.body?.accountId || null,
+      tasklistId: req.body?.tasklistId || req.body?.listId || null,
+      items
+    });
+    return res.status(200).json(payload);
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (message.toLowerCase().includes("permission") || message.toLowerCase().includes("reconnect")) {
+      return res.status(400).json({ message });
+    }
+    return next(error);
+  }
+}
+
+async function completeGoogleTask(req, res, next) {
+  try {
+    const taskId = String(req.params?.taskId || "").trim();
+    if (!taskId) {
+      return res.status(400).json({ message: "taskId is required" });
+    }
+    const payload = await integrationService.completeGoogleTask(req.user.userId, {
+      accountId: req.body?.accountId || req.query?.accountId || null,
+      tasklistId: req.body?.tasklistId || req.query?.tasklistId || req.query?.listId || null,
+      taskId
+    });
+    return res.status(200).json(payload);
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (message.toLowerCase().includes("required") || message.toLowerCase().includes("permission") || message.toLowerCase().includes("reconnect")) {
+      return res.status(400).json({ message });
+    }
+    return next(error);
+  }
+}
+
+async function exportPlannerToGoogleDoc(req, res, next) {
+  try {
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    const payload = await integrationService.exportPlannerToGoogleDoc(req.user.userId, {
+      accountId: req.body?.accountId || null,
+      title: req.body?.title || null,
+      items
+    });
+    return res.status(200).json(payload);
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (message.toLowerCase().includes("permission") || message.toLowerCase().includes("reconnect")) {
+      return res.status(400).json({ message });
+    }
     return next(error);
   }
 }
@@ -302,6 +419,11 @@ async function captureAcademiaSession(req, res, next) {
 
 async function syncAcademia(req, res, next) {
   try {
+    if (!areJobsAvailable()) {
+      const payload = await integrationService.syncAcademiaData(req.user.userId);
+      return res.status(200).json({ enqueued: false, mode: "direct", ...payload });
+    }
+
     const idempotencyKey = req.body?.idempotencyKey || req.query?.idempotencyKey || null;
     const result = await enqueueJob(JOB_TYPES.ACADEMIA_SYNC, {
       userId: req.user.userId,
@@ -331,6 +453,11 @@ async function syncAcademia(req, res, next) {
 
 async function syncAcademiaReports(req, res, next) {
   try {
+    if (!areJobsAvailable()) {
+      const payload = await integrationService.syncAcademiaReportsData(req.user.userId);
+      return res.status(200).json({ enqueued: false, mode: "direct", ...payload });
+    }
+
     const idempotencyKey = req.body?.idempotencyKey || req.query?.idempotencyKey || null;
     const result = await enqueueJob(JOB_TYPES.ACADEMIA_REPORTS_SYNC, {
       userId: req.user.userId,
@@ -427,6 +554,12 @@ module.exports = {
   setFitGoogleAccount,
   disconnectGoogleAccount,
   parseGmail,
+  listGoogleTaskLists,
+  listGoogleTasks,
+  createGoogleTask,
+  syncPlannerToGoogleTasks,
+  completeGoogleTask,
+  exportPlannerToGoogleDoc,
   pushWorkoutToFit,
   connectAcademia,
   captureAcademiaSession,

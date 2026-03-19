@@ -4,7 +4,23 @@ function isMissingView(error) {
   return String(error?.code || "") === "ER_NO_SUCH_TABLE";
 }
 
+function isMissingRoutine(error) {
+  return String(error?.code || "") === "ER_SP_DOES_NOT_EXIST";
+}
+
 async function createMarksRecord({ marksId, userId, subjectId, componentType, score, maxScore }) {
+  try {
+    await pool.query(
+      `CALL sp_safe_add_marks(?, ?, ?, ?, ?, ?)`,
+      [marksId, userId, subjectId, componentType, score, maxScore]
+    );
+    return;
+  } catch (error) {
+    if (!isMissingRoutine(error)) {
+      throw error;
+    }
+  }
+
   await pool.execute(
     `INSERT INTO marks_record
       (marks_id, user_id, subject_id, component_type, score, max_score)

@@ -6,6 +6,7 @@ export type MarkComponentRow = {
   name: string;
   obtained: number;
   total: number;
+  percentage?: number;
 };
 
 export interface MarksSubjectRow {
@@ -123,6 +124,29 @@ export function MarksView({ rows, expandedId, onToggleExpand }: MarksViewProps) 
                       className={`h-full rounded-full ${risk === "high" ? "bg-critical" : risk === "medium" ? "bg-warning" : "bg-gyaan"}`}
                     />
                   </div>
+
+                  {subject.components.length > 0 && (
+                    <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      {subject.components.map((c) => {
+                        const componentPct = Number.isFinite(Number(c.percentage))
+                          ? Number(c.percentage)
+                          : (Number(c.total) > 0 ? Number(((Number(c.obtained) / Number(c.total)) * 100).toFixed(2)) : 0);
+                        const componentRisk = getRisk(componentPct);
+                        const componentStyles = getRiskStyles(componentRisk);
+                        return (
+                          <div key={c.id} className={`rounded-lg border border-border/50 p-2 text-left ${componentStyles.bg}`}>
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-xs font-medium text-foreground">{c.name}</p>
+                              <p className={`text-[11px] font-semibold ${componentStyles.color}`}>{componentPct.toFixed(1)}%</p>
+                            </div>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {c.obtained}/{c.total}
+                            </p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </button>
 
                 {isExpanded && (
@@ -145,17 +169,8 @@ export function MarksView({ rows, expandedId, onToggleExpand }: MarksViewProps) 
                         </p>
                       </div>
                     )}
-                    {subject.components.length === 0 ? (
+                    {subject.components.length === 0 && (
                       <p className="text-xs text-muted-foreground">No mark components stored for this subject yet.</p>
-                    ) : (
-                      subject.components.map((c) => (
-                        <div key={c.id} className="bg-secondary/40 rounded-lg p-2 flex items-center justify-between">
-                          <p className="text-xs text-muted-foreground">{c.name}</p>
-                          <p className="text-xs font-semibold text-foreground">
-                            {c.obtained}/{c.total}
-                          </p>
-                        </div>
-                      ))
                     )}
                   </div>
                 )}

@@ -841,6 +841,353 @@ function avgDatasetFloat(dataset) {
   return count > 0 ? sum / count : null;
 }
 
+const GOOGLE_TASKS_SCOPE = "https://www.googleapis.com/auth/tasks";
+const GOOGLE_DOCS_SCOPE = "https://www.googleapis.com/auth/documents";
+const GOOGLE_DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file";
+
+function toBoolean(value, fallback = false) {
+  if (typeof value === "boolean") return value;
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return fallback;
+  return ["1", "true", "yes", "on"].includes(raw);
+}
+
+function toTaskDueRfc3339(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    return `${raw}T00:00:00.000Z`;
+  }
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+  return parsed.toISOString();
+}
+
+function formatPlannerTaskNotes(item) {
+  const lines = [];
+  if (item.sourceLabel) lines.push(`Source: ${item.sourceLabel}`);
+  if (item.assessmentLabel) lines.push(`Assessment: ${item.assessmentLabel}`);
+  if (item.optimalStart) lines.push(`Optimal start: ${item.optimalStart}`);
+  if (item.recommendedWindow) lines.push(`Recommended window: ${item.recommendedWindow}`);
+  if (item.concisePlan) lines.push(`Plan: ${item.concisePlan}`);
+  if (item.aiDetail) lines.push(`AI detail: ${item.aiDetail}`);
+  return lines.join("\n");
+}
+
+function normalizePlannerItems(items) {
+  return (Array.isArray(items) ? items : [])
+    .map((item, index) => {
+      const title = String(item?.title || item?.subject || "").trim();
+      const due = toTaskDueRfc3339(item?.dueDateIso || item?.due || null);
+      if (!title) {
+        return null;
+      }
+      return {
+        id: String(item?.id || `planner_${index + 1}`),
+        title,
+        due,
+        sourceLabel: String(item?.sourceLabel || "").trim() || null,
+        assessmentLabel: String(item?.assessmentLabel || "").trim() || null,
+        optimalStart: String(item?.optimalStart || "").trim() || null,
+        recommendedWindow: String(item?.recommendedWindow || "").trim() || null,
+        concisePlan: String(item?.concisePlan || "").trim() || null,
+        aiDetail: String(item?.aiDetail || "").trim() || null,
+        status: String(item?.status || "").trim() || null
+      };
+    })
+    .filter(Boolean);
+}
+
+async function getGoogleAccountAccess(userId, {
+  accountId = null,
+  requiredScopes = [],
+  allowMissingScopes = false
+} = {}) {
+  let resolvedAccountId = accountId;
+  if (!resolvedAccountId) {
+    const fitSelection = await getFitAccountSelection(userId).catch(() => ({ accountId: null }));
+    resolvedAccountId = fitSelection?.accountId || null;
+  }
+
+  const tokenRow = resolvedAccountId
+    ? await integrationModel.getGoogleAccountById(userId, resolvedAccountId)
+    : await integrationModel.getUserGoogleTokens(userId);
+
+  if (!tokenRow) {
+    throw new Error("Google account not connected");
+  }
+
+  const authClient = await buildUserGoogleClient(userId, tokenRow.account_id || resolvedAccountId || null);
+  if (!authClient) {
+    throw new Error("Unable to use connected Google account token");
+  }
+
+  const granted = parseGrantedScopes(tokenRow.granted_scopes || "");
+  if (!allowMissingScopes && requiredScopes.length > 0 && !hasRequiredScopes(granted, requiredScopes)) {
+    throw new Error("Connected Google account is missing required permission. Reconnect Google to refresh Tasks/Docs access.");
+  }
+
+  return {
+    authClient,
+    accountId: tokenRow.account_id || resolvedAccountId || null,
+    email: tokenRow.google_email || null,
+    grantedScopes: granted
+  };
+}
+
+async function listGoogleTaskLists(userId, { accountId = null } = {}) {
+  const { authClient, accountId: resolvedAccountId } = await getGoogleAccountAccess(userId, {
+    accountId,
+    requiredScopes: [GOOGLE_TASKS_SCOPE]
+  });
+  const tasks = google.tasks({ version: "v1", auth: authClient });
+  const response = await tasks.tasklists.list({ maxResults: 100 });
+  const items = (response?.data?.items || []).map((row) => ({
+    id: row.id || null,
+    title: row.title || "Tasks",
+    updated: row.updated || null,
+    selfLink: row.selfLink || null
+  }));
+  return {
+    accountId: resolvedAccountId,
+    items,
+    defaultTasklistId: items[0]?.id || "@default"
+  };
+}
+
+async function listGoogleTasks(userId, {
+  accountId = null,
+  tasklistId = null,
+  showCompleted = false
+} = {}) {
+  const { authClient, accountId: resolvedAccountId } = await getGoogleAccountAccess(userId, {
+    accountId,
+    requiredScopes: [GOOGLE_TASKS_SCOPE]
+  });
+  const tasks = google.tasks({ version: "v1", auth: authClient });
+  const response = await tasks.tasks.list({
+    tasklist: String(tasklistId || "@default"),
+    showCompleted: toBoolean(showCompleted, false),
+    showHidden: false,
+    maxResults: 100
+  });
+  return {
+    accountId: resolvedAccountId,
+    tasklistId: String(tasklistId || "@default"),
+    items: (response?.data?.items || []).map((row) => ({
+      id: row.id || null,
+      title: row.title || "",
+      notes: row.notes || null,
+      due: row.due || null,
+      status: row.status || "needsAction",
+      updated: row.updated || null,
+      selfLink: row.selfLink || null
+    }))
+  };
+}
+
+async function createGoogleTask(userId, {
+  accountId = null,
+  tasklistId = null,
+  title,
+  notes = null,
+  dueDateIso = null
+} = {}) {
+  const taskTitle = String(title || "").trim();
+  if (!taskTitle) {
+    throw new Error("title is required");
+  }
+
+  const { authClient, accountId: resolvedAccountId } = await getGoogleAccountAccess(userId, {
+    accountId,
+    requiredScopes: [GOOGLE_TASKS_SCOPE]
+  });
+  const tasks = google.tasks({ version: "v1", auth: authClient });
+  const response = await tasks.tasks.insert({
+    tasklist: String(tasklistId || "@default"),
+    requestBody: {
+      title: taskTitle,
+      notes: notes ? String(notes) : undefined,
+      due: toTaskDueRfc3339(dueDateIso)
+    }
+  });
+
+  return {
+    accountId: resolvedAccountId,
+    tasklistId: String(tasklistId || "@default"),
+    task: {
+      id: response?.data?.id || null,
+      title: response?.data?.title || taskTitle,
+      due: response?.data?.due || toTaskDueRfc3339(dueDateIso),
+      status: response?.data?.status || "needsAction"
+    }
+  };
+}
+
+async function syncPlannerToGoogleTasks(userId, {
+  accountId = null,
+  tasklistId = null,
+  items = []
+} = {}) {
+  const normalizedItems = normalizePlannerItems(items);
+  if (!normalizedItems.length) {
+    return { created: 0, skipped: 0, tasklistId: String(tasklistId || "@default"), items: [] };
+  }
+
+  const existing = await listGoogleTasks(userId, {
+    accountId,
+    tasklistId,
+    showCompleted: true
+  });
+  const seen = new Set(
+    (existing.items || []).map((task) => `${String(task.title || "").trim().toLowerCase()}|${String(task.due || "").slice(0, 10)}`)
+  );
+
+  let created = 0;
+  let skipped = 0;
+  const results = [];
+  for (const item of normalizedItems) {
+    const key = `${item.title.trim().toLowerCase()}|${String(item.due || "").slice(0, 10)}`;
+    if (seen.has(key)) {
+      skipped += 1;
+      results.push({ id: item.id, title: item.title, status: "skipped" });
+      continue;
+    }
+
+    const createdTask = await createGoogleTask(userId, {
+      accountId,
+      tasklistId,
+      title: item.title,
+      notes: formatPlannerTaskNotes(item),
+      dueDateIso: item.due
+    });
+    seen.add(key);
+    created += 1;
+    results.push({
+      id: item.id,
+      title: item.title,
+      status: "created",
+      taskId: createdTask?.task?.id || null
+    });
+  }
+
+  return {
+    created,
+    skipped,
+    tasklistId: String(tasklistId || "@default"),
+    items: results
+  };
+}
+
+async function completeGoogleTask(userId, {
+  accountId = null,
+  tasklistId = null,
+  taskId
+} = {}) {
+  const normalizedTaskId = String(taskId || "").trim();
+  if (!normalizedTaskId) {
+    throw new Error("taskId is required");
+  }
+  const { authClient, accountId: resolvedAccountId } = await getGoogleAccountAccess(userId, {
+    accountId,
+    requiredScopes: [GOOGLE_TASKS_SCOPE]
+  });
+  const tasks = google.tasks({ version: "v1", auth: authClient });
+  const response = await tasks.tasks.patch({
+    tasklist: String(tasklistId || "@default"),
+    task: normalizedTaskId,
+    requestBody: {
+      status: "completed",
+      completed: new Date().toISOString()
+    }
+  });
+  return {
+    accountId: resolvedAccountId,
+    tasklistId: String(tasklistId || "@default"),
+    task: {
+      id: response?.data?.id || normalizedTaskId,
+      title: response?.data?.title || null,
+      status: response?.data?.status || "completed",
+      completed: response?.data?.completed || new Date().toISOString()
+    }
+  };
+}
+
+async function exportPlannerToGoogleDoc(userId, {
+  accountId = null,
+  title = null,
+  items = []
+} = {}) {
+  const normalizedItems = normalizePlannerItems(items);
+  const documentTitle = String(title || "").trim() || `GAK Planner Export ${new Date().toISOString().slice(0, 10)}`;
+  const { authClient, accountId: resolvedAccountId } = await getGoogleAccountAccess(userId, {
+    accountId,
+    requiredScopes: [GOOGLE_DOCS_SCOPE, GOOGLE_DRIVE_FILE_SCOPE]
+  });
+  const docs = google.docs({ version: "v1", auth: authClient });
+  const drive = google.drive({ version: "v3", auth: authClient });
+
+  const created = await docs.documents.create({
+    requestBody: { title: documentTitle }
+  });
+  const documentId = created?.data?.documentId || null;
+  if (!documentId) {
+    throw new Error("Failed to create Google Doc");
+  }
+
+  const lines = [
+    documentTitle,
+    "",
+    `Generated by GAK on ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}`,
+    "",
+    ...(normalizedItems.length > 0
+      ? normalizedItems.flatMap((item, index) => {
+        const section = [
+          `${index + 1}. ${item.title}`,
+          `Due: ${item.due ? item.due.slice(0, 10) : "Not specified"}`
+        ];
+        if (item.status) section.push(`Status: ${item.status}`);
+        if (item.sourceLabel) section.push(`Source: ${item.sourceLabel}`);
+        if (item.assessmentLabel) section.push(`Assessment: ${item.assessmentLabel}`);
+        if (item.optimalStart) section.push(`Optimal start: ${item.optimalStart}`);
+        if (item.recommendedWindow) section.push(`Recommended window: ${item.recommendedWindow}`);
+        if (item.concisePlan) section.push(`Plan: ${item.concisePlan}`);
+        if (item.aiDetail) section.push(`AI detail: ${item.aiDetail}`);
+        section.push("");
+        return section;
+      })
+      : ["No planner items were provided.", ""])
+  ];
+
+  await docs.documents.batchUpdate({
+    documentId,
+    requestBody: {
+      requests: [
+        {
+          insertText: {
+            location: { index: 1 },
+            text: `${lines.join("\n")}\n`
+          }
+        }
+      ]
+    }
+  });
+
+  await drive.files.get({
+    fileId: documentId,
+    fields: "webViewLink"
+  }).catch(() => null);
+
+  return {
+    accountId: resolvedAccountId,
+    documentId,
+    title: documentTitle,
+    url: `https://docs.google.com/document/d/${documentId}/edit`
+  };
+}
+
 function getCurrentDateInIst() {
   const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Asia/Kolkata",
@@ -1653,6 +2000,19 @@ function getAcademiaStatePaths(userId) {
   };
 }
 
+function clearAcademiaStateFiles(userId) {
+  const { encryptedPath, legacyJsonPath } = getAcademiaStatePaths(userId);
+  for (const filePath of [encryptedPath, legacyJsonPath]) {
+    try {
+      if (filePath && fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    } catch (_error) {
+      // Ignore cleanup failures; a fresh state capture may still succeed.
+    }
+  }
+}
+
 function persistEncryptedAcademiaStateFromJson(userId, jsonPath) {
   const inputPath = String(jsonPath || "").trim();
   if (!inputPath || !fs.existsSync(inputPath)) {
@@ -1848,9 +2208,9 @@ function normalizeMarksRows(rows, timetableRows = [], attendanceRows = []) {
 
     const percentage = Number(((score / maxScore) * 100).toFixed(2));
     const subjectCodeForKey = /^[0-9]{2}[A-Z]{2,}\d+[A-Z]?$/.test(normalizedCode) ? normalizedCode : "";
-    const examTypeForKey = String(row?.examType || componentName || "overall").toLowerCase().trim() || "overall";
+    const componentKey = String(componentName || row?.componentName || row?.component_name || "overall").toLowerCase().trim() || "overall";
     const termForKey = String(row?.term || row?.semester || row?.examTerm || "current").toLowerCase().trim() || "current";
-    const stableKey = `${termForKey}|${examTypeForKey}|${subjectCodeForKey || subjectName.toLowerCase()}`;
+    const stableKey = `${termForKey}|${componentKey}|${subjectCodeForKey || subjectName.toLowerCase()}`;
     const normalizedRow = {
       id: row?.id || createId("amk"),
       subjectName,
@@ -1961,6 +2321,36 @@ async function captureAcademiaSession(userId) {
   };
 }
 
+async function refreshAcademiaSessionFromStoredCredentials(userId, account, { force = false } = {}) {
+  if (!account?.college_email || !account?.password_encrypted) {
+    throw new Error("Academia account not connected");
+  }
+
+  if (force) {
+    clearAcademiaStateFiles(userId);
+  }
+
+  const { legacyJsonPath: outPath } = getAcademiaStatePaths(userId);
+  academiaLog(userId, "session_refresh_start", { force });
+  await captureAcademiaStorageState({
+    collegeEmail: account.college_email,
+    collegePassword: decrypt(account.password_encrypted),
+    outputPath: outPath,
+    headless: true
+  });
+  const encryptedPath = persistEncryptedAcademiaStateFromJson(userId, outPath);
+  const decryptedState = readEncryptedAcademiaState(userId);
+  if (!encryptedPath || !decryptedState) {
+    throw new Error("Academia session refresh completed, but no reusable session state was saved");
+  }
+  academiaLog(userId, "session_refresh_done", { force, encrypted: true });
+  return {
+    storageState: decryptedState,
+    storageStatePath: null,
+    source: "encrypted_state_refreshed"
+  };
+}
+
 async function scrapeAcademiaForSync({ userId, account, syncLabel = "sync" }) {
   const lockKey = `${userId}:${syncLabel}`;
   const activeTask = academiaSyncInFlight.get(lockKey);
@@ -1974,7 +2364,7 @@ async function scrapeAcademiaForSync({ userId, account, syncLabel = "sync" }) {
       : "full";
 
   const task = (async () => {
-    const sessionBootstrap = ensureSession({ userId });
+    let sessionBootstrap = ensureSession({ userId });
     try {
       return await fetchAttendanceRaw({
         userId,
@@ -1984,8 +2374,41 @@ async function scrapeAcademiaForSync({ userId, account, syncLabel = "sync" }) {
         scrapeMode
       });
     } catch (error) {
+      const firstMessage = String(error.message || "Academia sync failed");
+      const firstSyncState = classifyAcademiaSyncState(firstMessage);
+
+      const missingReusableSession = sessionBootstrap.source === "none" || sessionBootstrap.source === "env_state_missing";
+      const shouldAutoRefreshSession =
+        Boolean(account?.password_encrypted)
+        && (missingReusableSession || firstSyncState === "requires_relogin");
+
+      if (shouldAutoRefreshSession) {
+        try {
+          sessionBootstrap = await refreshAcademiaSessionFromStoredCredentials(userId, account, {
+            force: firstSyncState === "requires_relogin"
+          });
+          return await fetchAttendanceRaw({
+            userId,
+            collegeEmail: account.college_email,
+            collegePassword: decrypt(account.password_encrypted),
+            session: sessionBootstrap,
+            scrapeMode
+          });
+        } catch (refreshError) {
+          const refreshMessage = String(refreshError?.message || firstMessage);
+          const refreshSyncState = classifyAcademiaSyncState(refreshMessage);
+          academiaLog(userId, `${syncLabel}_session_refresh_failed`, {
+            syncState: refreshSyncState,
+            reason: refreshMessage.slice(0, 220)
+          });
+          const wrapped = new Error(refreshMessage);
+          wrapped.syncState = refreshSyncState;
+          error = wrapped;
+        }
+      }
+
       const message = String(error.message || "Academia sync failed");
-      const syncState = classifyAcademiaSyncState(message);
+      const syncState = String(error?.syncState || "") || classifyAcademiaSyncState(message);
       academiaLog(userId, `${syncLabel}_failed`, { syncState, reason: message.slice(0, 220) });
       await integrationModel.updateAcademiaSyncState(userId, {
         status: shouldKeepAcademiaConnectedOnFailure(account) ? "connected" : "failed",
@@ -2027,7 +2450,7 @@ async function syncAcademiaData(userId) {
     attendanceHash: normalizedAttendance.version,
     sourceUrl: String(scraped?.sourceUrl || "")
   });
-  if (normalizedAttendance.aggregate.length === 0) {
+  if (normalizedAttendance.aggregate.length === 0 && scrapedMarks.length === 0) {
     const message = "Academia attendance sync found no aggregate rows. Run One-time Login and retry.";
     const syncState = "requires_relogin";
     academiaLog(userId, "sync_marks_attendance_failed", { syncState, reason: message });
@@ -2052,11 +2475,15 @@ async function syncAcademiaData(userId) {
   ]);
 
   const marksChanged = scrapedMarks.length > 0 && hashMarksRows(existingMarks) !== hashMarksRows(scrapedMarks);
-  const attendanceChanged = hashAttendanceRows(existingAttendance || []) !== normalizedAttendance.version;
+  const attendanceAvailable = normalizedAttendance.aggregate.length > 0;
+  const attendanceChanged = attendanceAvailable
+    ? hashAttendanceRows(existingAttendance || []) !== normalizedAttendance.version
+    : false;
 
   academiaLog(userId, "sync_marks_attendance_diff", {
     marksChanged,
-    attendanceChanged
+    attendanceChanged,
+    attendanceAvailable
   });
 
   const dbUpsertStartMs = Date.now();
@@ -2092,7 +2519,7 @@ async function syncAcademiaData(userId) {
     syncState: "success",
     timetableCount: 0,
     marksCount: scrapedMarks.length,
-    attendanceCount: normalizedAttendance.aggregate.length,
+    attendanceCount: attendanceAvailable ? normalizedAttendance.aggregate.length : existingAttendance.length,
     attendanceDailyCount: normalizedAttendance.daily.length,
     writes: {
       timetable: false,
@@ -2323,6 +2750,12 @@ module.exports = {
   syncGoogleCalendarEvents,
   refreshGoogleTokensJob,
   getCalendarEvents,
+  listGoogleTaskLists,
+  listGoogleTasks,
+  createGoogleTask,
+  syncPlannerToGoogleTasks,
+  completeGoogleTask,
+  exportPlannerToGoogleDoc,
   getIntegrationStatus,
   listGoogleAccounts,
   setPrimaryGoogleAccount,

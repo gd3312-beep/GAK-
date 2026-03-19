@@ -28,6 +28,17 @@ type MarksDetailRow = {
   recorded_at: string;
 };
 
+function componentOrder(name: string) {
+  const value = String(name || "").trim().toUpperCase();
+  if (/^FT[- ]?I$|^FT[- ]?1$/.test(value)) return 10;
+  if (/^FT[- ]?II$|^FT[- ]?2$/.test(value)) return 20;
+  if (/^FJ[- ]?I$|^FJ[- ]?1$/.test(value)) return 30;
+  if (/^FJ[- ]?II$|^FJ[- ]?2$/.test(value)) return 40;
+  if (/^FML[- ]?I$|^FML[- ]?1$/.test(value)) return 50;
+  if (/quiz|assignment|lab|practical|overall/.test(value.toLowerCase())) return 60;
+  return 999;
+}
+
 function buildMarksSubjects(perfRows: PerformanceRow[], detailRows: MarksDetailRow[]): MarksSubjectRow[] {
   const bySubject = new Map<
     string,
@@ -61,20 +72,31 @@ function buildMarksSubjects(perfRows: PerformanceRow[], detailRows: MarksDetailR
       id: d.marks_id,
       name: d.component_type,
       obtained: Number(d.score),
-      total: Number(d.max_score)
+      total: Number(d.max_score),
+      percentage: Number(d.max_score) > 0 ? Number(((Number(d.score) / Number(d.max_score)) * 100).toFixed(2)) : 0
     });
     bySubject.set(d.subject_id, current);
   }
 
-  return Array.from(bySubject.entries()).map(([id, value]) => ({
-    id,
-    subjectName: value.subjectName,
-    averagePercentage: value.avgPct,
-    components: value.components,
-    topPercent: value.topPercent,
-    sectionRank: value.sectionRank,
-    classSize: value.classSize
-  }));
+  return Array.from(bySubject.entries()).map(([id, value]) => {
+    const sortedComponents = [...value.components].sort((a, b) => {
+      const byKnownOrder = componentOrder(a.name) - componentOrder(b.name);
+      if (byKnownOrder !== 0) return byKnownOrder;
+      return a.name.localeCompare(b.name);
+    });
+    const totalObtained = sortedComponents.reduce((sum, c) => sum + Number(c.obtained || 0), 0);
+    const totalMax = sortedComponents.reduce((sum, c) => sum + Number(c.total || 0), 0);
+    const weightedAverage = totalMax > 0 ? Number(((totalObtained / totalMax) * 100).toFixed(2)) : value.avgPct;
+    return {
+      id,
+      subjectName: value.subjectName,
+      averagePercentage: weightedAverage,
+      components: sortedComponents,
+      topPercent: value.topPercent,
+      sectionRank: value.sectionRank,
+      classSize: value.classSize
+    };
+  });
 }
 
 const Marks = () => {

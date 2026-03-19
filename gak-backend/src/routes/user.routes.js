@@ -1,6 +1,5 @@
 const express = require("express");
 const rateLimit = require("express-rate-limit");
-const multer = require("multer");
 
 const authMiddleware = require("../middleware/auth.middleware");
 const userController = require("../controllers/user.controller");
@@ -15,15 +14,30 @@ const authRateLimit = rateLimit({
   skipSuccessfulRequests: true,
   message: { message: "Too many authentication attempts. Try again shortly." }
 });
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 2 * 1024 * 1024 }
-});
+let uploadMiddleware = null;
+
+function resolveUploadMiddleware() {
+  if (uploadMiddleware) {
+    return uploadMiddleware;
+  }
+
+  try {
+    const multer = require("multer");
+    uploadMiddleware = multer({
+      storage: multer.memoryStorage(),
+      limits: { fileSize: 2 * 1024 * 1024 }
+    }).single("photo");
+  } catch (error) {
+    uploadMiddleware = (_req, _res, next) => next(error);
+  }
+
+  return uploadMiddleware;
+}
 
 router.post("/register", authRateLimit, userController.register);
 router.post("/login", authRateLimit, userController.login);
 router.get("/me", authMiddleware, userController.getProfile);
-router.patch("/me/profile-photo", authMiddleware, upload.single("photo"), userController.updateProfilePhoto);
+router.patch("/me/profile-photo", authMiddleware, (req, res, next) => resolveUploadMiddleware()(req, res, next), userController.updateProfilePhoto);
 router.get("/me/export", authMiddleware, userController.exportMyData);
 router.delete("/me", authMiddleware, userController.deleteMyAccount);
 

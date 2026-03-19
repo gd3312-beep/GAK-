@@ -5,7 +5,10 @@ const PURPOSE_SCOPES = {
   calendar_gmail: [
     ...BASE_SCOPES,
     "https://www.googleapis.com/auth/calendar.events",
-    "https://www.googleapis.com/auth/gmail.readonly"
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/tasks",
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/drive.file"
   ],
   fit: [
     ...BASE_SCOPES,
@@ -18,6 +21,9 @@ const PURPOSE_SCOPES = {
     ...BASE_SCOPES,
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/tasks",
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/drive.file",
     "https://www.googleapis.com/auth/fitness.activity.read",
     "https://www.googleapis.com/auth/fitness.activity.write",
     "https://www.googleapis.com/auth/fitness.body.read",

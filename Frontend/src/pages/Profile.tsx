@@ -15,7 +15,6 @@ import {
   ChevronRight,
   Settings,
   LogOut,
-  FileText,
   BookOpen,
   Dumbbell,
   Utensils,
@@ -55,8 +54,6 @@ type IntegrationStatus = {
     isPrimary: boolean;
     hasFitPermissions?: boolean | null;
     hasCalendarGmailPermissions?: boolean | null;
-    hasTasksPermissions?: boolean | null;
-    hasDocsPermissions?: boolean | null;
     createdAt: string | null;
     updatedAt: string | null;
   }>;
@@ -350,25 +347,13 @@ const Profile = () => {
   const googleAccountCount = status?.googleAccountCount ?? googleAccounts.length;
   const googleConnected = Boolean(status?.googleConnected);
   const fitLocked = Boolean(status?.fitGoogleAccountLocked);
-  const tasksConnected = googleAccounts.some((item) => item.hasTasksPermissions === true);
-  const docsConnected = googleAccounts.some((item) => item.hasDocsPermissions === true);
   const googleSummary = googleConnected
     ? `${googleAccountCount} account${googleAccountCount === 1 ? "" : "s"}${primaryGoogleAccount?.email ? ` • primary ${primaryGoogleAccount.email}` : ""}`
     : "Not connected";
   const fitSummary = fitLocked
-    ? `Locked to ${status?.fitGoogleAccountEmail || "selected account"}`
+    ? `Locked to ${status?.fitGoogleAccountEmail || "selected account"} for Fit, Tasks, and Docs`
     : googleConnected
-      ? "Choose one linked account once for Fit"
-      : "Connect Google account first";
-  const tasksSummary = tasksConnected
-    ? "Planner task sync enabled"
-    : googleConnected
-      ? "Grant Google Tasks permission to sync planner items"
-      : "Connect Google account first";
-  const docsSummary = docsConnected
-    ? "Planner export to Docs enabled"
-    : googleConnected
-      ? "Grant Google Docs permission to export planner report"
+      ? "Choose one linked account once for Fit, Tasks, and Docs"
       : "Connect Google account first";
 
   const integrations = [
@@ -401,26 +386,6 @@ const Profile = () => {
       border: "border-l-ahara",
       iconBg: "bg-ahara/10",
       iconColor: "text-ahara"
-    },
-    {
-      id: "googletasks",
-      name: "Google Tasks",
-      icon: CheckCircle,
-      connected: tasksConnected,
-      lastSync: tasksSummary,
-      border: "border-l-gak",
-      iconBg: "bg-gak/10",
-      iconColor: "text-gak"
-    },
-    {
-      id: "googledocs",
-      name: "Google Docs",
-      icon: FileText,
-      connected: docsConnected,
-      lastSync: docsSummary,
-      border: "border-l-gak",
-      iconBg: "bg-gak/10",
-      iconColor: "text-gak"
     }
   ];
 
@@ -590,7 +555,7 @@ const Profile = () => {
                 <div>
                   <h3 className="font-medium text-foreground">Google Accounts</h3>
                   <p className="text-xs text-muted-foreground">
-                    {googleConnected ? googleSummary : "Connect one or more Google accounts for Calendar, Gmail, and Fit"}
+                    {googleConnected ? `${googleSummary} • used for Calendar, Gmail, Tasks, Docs${fitLocked ? ", and Fit" : ""}` : "Connect one or more Google accounts for Calendar, Gmail, Tasks, Docs, and Fit"}
                   </p>
                 </div>
                 <Button
@@ -649,30 +614,18 @@ const Profile = () => {
                               void startGoogleOAuth("fit");
                               return;
                             }
-                            setError("Choose a linked Google account for Fit below (one-time).");
-                          } else if (integration.id === "googletasks") {
-                            void startGoogleOAuth("tasks");
-                          } else if (integration.id === "googledocs") {
-                            void startGoogleOAuth("docs");
+                            setError("Choose a linked Google account below. That one selection will be used for Fit, Tasks, and Docs.");
                           } else {
                             const purpose =
                               integration.id === "googlecalendar" || integration.id === "calendar" || integration.id === "gmail"
                                 ? "calendar_gmail"
                                 : integration.id === "googlefit"
                                   ? "fit"
-                                  : integration.id === "googletasks"
-                                    ? "tasks"
-                                    : integration.id === "googledocs"
-                                      ? "docs"
                                   : "all";
                             void startGoogleOAuth(purpose);
                           }
                         } else if (integration.id === "gmail") {
                           void parseGmail();
-                        } else if (integration.id === "googletasks") {
-                          navigate("/planner");
-                        } else if (integration.id === "googledocs") {
-                          navigate("/planner");
                         } else if (integration.id === "googlefit") {
                           navigate("/karma");
                         } else {
@@ -704,7 +657,7 @@ const Profile = () => {
                       <div className="min-w-0">
                         <p className="text-sm text-foreground truncate">{account.email || account.googleId || account.accountId}</p>
                         <p className="text-xs text-muted-foreground">
-                          {account.accountId === status?.fitGoogleAccountId ? "Google Fit account (locked)" : account.isPrimary ? "Primary account" : "Secondary account"}
+                          {account.accountId === status?.fitGoogleAccountId ? "Selected account for Fit, Tasks, and Docs" : account.isPrimary ? "Primary account" : "Secondary account"}
                         </p>
                       </div>
                       <div className="flex gap-2">
@@ -726,7 +679,7 @@ const Profile = () => {
                             }}
                             disabled={fitBusy || account.hasFitPermissions === false}
                           >
-                            {fitBusy ? "Saving..." : "Use for Fit"}
+                            {fitBusy ? "Saving..." : "Use for Fit + Planner"}
                           </Button>
                         )}
                       </div>

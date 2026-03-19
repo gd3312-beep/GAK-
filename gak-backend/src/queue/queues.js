@@ -25,11 +25,34 @@ function queueOptions() {
   };
 }
 
-const syncQueue = new Queue(QUEUE_NAMES.SYNC, queueOptions());
-const dlqQueue = new Queue(QUEUE_NAMES.DLQ, { connection: getRedis() });
+function jobsEnabled() {
+  const raw = String(process.env.ENABLE_JOBS || "true").trim().toLowerCase();
+  return raw !== "false" && raw !== "0" && raw !== "off";
+}
+
+function createDisabledQueue(name) {
+  return {
+    name,
+    async add() {
+      throw new Error("Background jobs are disabled");
+    },
+    async getJob() {
+      return null;
+    }
+  };
+}
+
+const syncQueue = jobsEnabled()
+  ? new Queue(QUEUE_NAMES.SYNC, queueOptions())
+  : createDisabledQueue(QUEUE_NAMES.SYNC);
+
+const dlqQueue = jobsEnabled()
+  ? new Queue(QUEUE_NAMES.DLQ, { connection: getRedis() })
+  : createDisabledQueue(QUEUE_NAMES.DLQ);
 
 module.exports = {
   QUEUE_NAMES,
+  jobsEnabled,
   syncQueue,
   dlqQueue
 };

@@ -34,6 +34,7 @@ CORE_SQL_FILES=(
   "sql/11_schema_normalization.sql"
   "sql/12_academia_sync_metadata.sql"
   "sql/views.sql"
+  "sql/13_db_hardening_routines.sql"
 )
 
 SAMPLE_SQL_FILES=(

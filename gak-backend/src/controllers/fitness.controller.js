@@ -1,19 +1,43 @@
 const path = require("path");
 const fs = require("fs/promises");
-let pdfParse = null;
-try {
-  pdfParse = require("pdf-parse");
-} catch (_error) {
-  pdfParse = null;
-}
 
 const workoutModel = require("../models/workout.model");
 const workoutPlanModel = require("../models/workout-plan.model");
 const analyticsService = require("../services/analytics.service");
 const behaviorService = require("../services/behavior.service");
-const integrationService = require("../services/integration.service");
-const { parseWorkoutPlanPdf } = require("../utils/workout-plan.util");
 const { createId } = require("../utils/id.util");
+
+let cachedPdfParse = undefined;
+let cachedIntegrationService = null;
+let cachedWorkoutPlanParser = null;
+
+function getPdfParse() {
+  if (cachedPdfParse !== undefined) {
+    return cachedPdfParse;
+  }
+
+  try {
+    cachedPdfParse = require("pdf-parse");
+  } catch (_error) {
+    cachedPdfParse = null;
+  }
+
+  return cachedPdfParse;
+}
+
+function getIntegrationService() {
+  if (!cachedIntegrationService) {
+    cachedIntegrationService = require("../services/integration.service");
+  }
+  return cachedIntegrationService;
+}
+
+function getWorkoutPlanParser() {
+  if (!cachedWorkoutPlanParser) {
+    cachedWorkoutPlanParser = require("../utils/workout-plan.util");
+  }
+  return cachedWorkoutPlanParser;
+}
 
 function ensureSelf(req, res, paramName = "userId") {
   const paramValue = req.params?.[paramName];
@@ -92,6 +116,7 @@ async function updateWorkoutAction(req, res, next) {
     });
 
     if (actionType === "done") {
+      const integrationService = getIntegrationService();
       await integrationService.pushWorkoutToGoogleFit(req.user.userId, sessionId);
     }
 
@@ -110,12 +135,14 @@ async function getFitnessSummary(req, res, next) {
 
     if (refresh) {
       // Explicit refresh path used by Karma page open: fetch latest body metrics before reading summary.
+      const integrationService = getIntegrationService();
       await integrationService.syncGoogleFitBodyMetrics(userId).catch(() => null);
     }
 
     const summary = await analyticsService.getFitnessSummary(userId);
     if (!refresh && summary && (summary.height === null || summary.weight === null)) {
       // Keep default summary endpoint fast: background refresh only.
+      const integrationService = getIntegrationService();
       void integrationService.syncGoogleFitBodyMetrics(userId).catch(() => null);
     }
     return res.status(200).json(summary);
@@ -130,6 +157,7 @@ async function getFitDaily(req, res, next) {
     const date = isIsoDate(requestDate) ? requestDate : new Date().toISOString().slice(0, 10);
     const refreshRaw = String(req.query.refresh || "").toLowerCase();
     const refresh = ["1", "true", "yes", "force"].includes(refreshRaw);
+    const integrationService = getIntegrationService();
     let result;
     if (refresh) {
       result = await integrationService.syncGoogleFitDailyMetrics(req.user.userId, date).catch(async () => (
@@ -150,6 +178,7 @@ async function getFitRange(req, res, next) {
     if (!from || !isIsoDate(from)) {
       return res.status(400).json({ message: "from (YYYY-MM-DD) is required" });
     }
+    const integrationService = getIntegrationService();
     const rows = await integrationService.listFitMetricsRange(req.user.userId, from);
     return res.status(200).json({ from: String(from).slice(0, 10), rows });
   } catch (error) {
@@ -169,6 +198,7 @@ async function getFitActivities(req, res, next) {
     if (!isIsoDate(to)) {
       return res.status(400).json({ message: "to (YYYY-MM-DD) must be valid when provided" });
     }
+    const integrationService = getIntegrationService();
     const payload = await integrationService.listGoogleFitActivities(req.user.userId, {
       fromDate: from,
       toDate: to,
@@ -280,9 +310,11 @@ async function uploadWorkoutPlan(req, res, next) {
       return res.status(400).json({ message: "PDF file is required" });
     }
 
+    const pdfParse = getPdfParse();
     if (!pdfParse) {
       return res.status(400).json({ message: "pdf-parse is not installed on backend" });
     }
+    const { parseWorkoutPlanPdf } = getWorkoutPlanParser();
 
     const planId = createId("wp");
     const userId = req.user.userId;
@@ -545,6 +577,7 @@ async function setTodayWorkoutAction(req, res, next) {
     let fitSync = null;
     let fitDaily = null;
     if (actionType === "done") {
+      const integrationService = getIntegrationService();
       fitSync = await integrationService.pushWorkoutToGoogleFit(req.user.userId, session.session_id).catch((error) => ({
         sessionId: session.session_id,
         googleFitSessionId: null,
