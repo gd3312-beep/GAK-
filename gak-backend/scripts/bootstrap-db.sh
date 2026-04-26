@@ -35,6 +35,7 @@ CORE_SQL_FILES=(
   "sql/12_academia_sync_metadata.sql"
   "sql/views.sql"
   "sql/13_db_hardening_routines.sql"
+  "sql/14_user_sessions.sql"
 )
 
 SAMPLE_SQL_FILES=(

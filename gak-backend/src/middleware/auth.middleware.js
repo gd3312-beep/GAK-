@@ -1,6 +1,7 @@
 const { verifyAuthToken } = require("../utils/jwt.util");
+const authSessionModel = require("../models/auth-session.model");
 
-function authMiddleware(req, res, next) {
+async function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -11,6 +12,15 @@ function authMiddleware(req, res, next) {
 
   try {
     const payload = verifyAuthToken(token);
+    const sessionId = String(payload?.sid || "");
+    if (!sessionId) {
+      return res.status(401).json({ message: "Invalid session" });
+    }
+    const session = await authSessionModel.getSessionById(sessionId);
+    if (!session || session.user_id !== payload.userId || session.revoked_at || new Date(session.expires_at).getTime() <= Date.now()) {
+      return res.status(401).json({ message: "Session expired. Please sign in again." });
+    }
+    await authSessionModel.touchSession(sessionId);
     req.user = payload;
     return next();
   } catch (_error) {

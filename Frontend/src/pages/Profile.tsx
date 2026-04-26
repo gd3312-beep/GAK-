@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
@@ -124,6 +124,8 @@ const Profile = () => {
   const [behaviorBusy, setBehaviorBusy] = useState(false);
   const [behaviorData, setBehaviorData] = useState<BehaviorAnalysisPayload | null>(null);
   const [profilePhotoBusy, setProfilePhotoBusy] = useState(false);
+  const loadProfileInFlightRef = useRef(false);
+  const lastAutoLoadKeyRef = useRef<string | null>(null);
 
   const resolveProfileImageUrl = (raw: string | null | undefined) => {
     const value = String(raw || "").trim();
@@ -136,7 +138,9 @@ const Profile = () => {
   const profileImageUrl = resolveProfileImageUrl(profile?.profile_image_url || user?.profileImageUrl || null);
 
   const loadProfile = async () => {
+    if (loadProfileInFlightRef.current) return;
     try {
+      loadProfileInFlightRef.current = true;
       setError("");
       const [profileResp, statusResp] = await Promise.all([
         apiRequest<UserProfile>("/api/users/me"),
@@ -150,6 +154,8 @@ const Profile = () => {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load profile");
+    } finally {
+      loadProfileInFlightRef.current = false;
     }
   };
 
@@ -186,6 +192,12 @@ const Profile = () => {
     } else if (googleState === "error") {
       setError(`Google OAuth failed: ${reason || "Unknown error"}`);
     }
+
+    const autoLoadKey = `${user.userId}:${location.search}`;
+    if (lastAutoLoadKeyRef.current === autoLoadKey) {
+      return;
+    }
+    lastAutoLoadKeyRef.current = autoLoadKey;
 
     void loadProfile();
   }, [location.search, navigate, user]);

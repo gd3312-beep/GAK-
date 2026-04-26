@@ -3,6 +3,7 @@ const path = require("path");
 const fs = require("fs/promises");
 
 const userModel = require("../models/user.model");
+const authSessionModel = require("../models/auth-session.model");
 const { signAuthToken } = require("../utils/jwt.util");
 const { createId } = require("../utils/id.util");
 
@@ -102,10 +103,28 @@ async function login(req, res, next) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    const token = signAuthToken({ userId: user.user_id, email: user.email });
+    const userAgent = String(req.headers["user-agent"] || "").slice(0, 512);
+    const deviceId = String(req.headers["x-device-id"] || "web");
+    const deviceName = String(req.headers["x-device-name"] || "");
+    const xff = String(req.headers["x-forwarded-for"] || "");
+    const ipAddress = String((xff.split(",")[0] || req.ip || req.socket?.remoteAddress || "").trim() || "");
+    const session = await authSessionModel.createSession({
+      userId: user.user_id,
+      deviceId,
+      deviceName: deviceName || deviceId || "Web Device",
+      userAgent,
+      ipAddress
+    });
+
+    const token = signAuthToken({ userId: user.user_id, email: user.email, sid: session.sessionId });
 
     return res.status(200).json({
       token,
+      session: {
+        sessionId: session.sessionId,
+        expiresAt: session.expiresAt,
+        maxActiveSessions: authSessionModel.MAX_ACTIVE_SESSIONS
+      },
       user: {
         userId: user.user_id,
         fullName: user.full_name,
@@ -206,8 +225,52 @@ async function deleteMyAccount(req, res, next) {
       return res.status(401).json({ message: "Invalid password" });
     }
 
+    await authSessionModel.revokeAllSessionsForUser(userId, "account_deleted");
     await userModel.deleteUserData(userId);
     return res.status(200).json({ deleted: true });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function listMySessions(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const currentSessionId = String(req.user.sid || "");
+    const sessions = await authSessionModel.listSessionsForUser(userId);
+    return res.status(200).json({
+      maxActiveSessions: authSessionModel.MAX_ACTIVE_SESSIONS,
+      currentSessionId,
+      sessions
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function logoutCurrentSession(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const sessionId = String(req.user.sid || "");
+    if (!sessionId) {
+      return res.status(400).json({ message: "Session identifier missing in token" });
+    }
+    await authSessionModel.revokeSession({ sessionId, userId, reason: "logout" });
+    return res.status(200).json({ loggedOut: true });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function revokeSession(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const sessionId = String(req.params.sessionId || "").trim();
+    if (!sessionId) {
+      return res.status(400).json({ message: "sessionId is required" });
+    }
+    await authSessionModel.revokeSession({ sessionId, userId, reason: "manual_revoke" });
+    return res.status(200).json({ revoked: true });
   } catch (error) {
     return next(error);
   }
@@ -219,5 +282,8 @@ module.exports = {
   getProfile,
   updateProfilePhoto,
   exportMyData,
-  deleteMyAccount
+  deleteMyAccount,
+  listMySessions,
+  logoutCurrentSession,
+  revokeSession
 };

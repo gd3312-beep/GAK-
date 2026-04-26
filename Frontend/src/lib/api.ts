@@ -7,6 +7,7 @@ export type SessionUser = {
 
 const TOKEN_KEY = "gak_token";
 const USER_KEY = "gak_user";
+const DEVICE_ID_KEY = "gak_device_id";
 
 function resolveApiBase(): string {
   const configured = String(import.meta.env.VITE_API_URL || "").trim();
@@ -38,6 +39,19 @@ let cachedUser: SessionUser | null = null;
 
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
+}
+
+function getDeviceId(): string {
+  const existing = localStorage.getItem(DEVICE_ID_KEY);
+  if (existing) return existing;
+  const generated = `web_${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`;
+  localStorage.setItem(DEVICE_ID_KEY, generated);
+  return generated;
+}
+
+function getDeviceName(): string {
+  if (typeof navigator === "undefined") return "Web Browser";
+  return [navigator.platform || "Web", navigator.userAgent || "Browser"].join(" | ").slice(0, 128);
 }
 
 export function getSessionUser(): SessionUser | null {
@@ -103,6 +117,8 @@ export async function apiRequest<T = unknown>(path: string, options: ApiOptions 
   if (!isFormData) {
     headers["Content-Type"] = "application/json";
   }
+  headers["X-Device-Id"] = getDeviceId();
+  headers["X-Device-Name"] = getDeviceName();
 
   if (auth) {
     const token = getToken();
@@ -124,6 +140,7 @@ export async function apiRequest<T = unknown>(path: string, options: ApiOptions 
     response = await fetch(`${API_BASE}${path}`, {
       method,
       headers,
+      credentials: "include",
       cache,
       signal: controller?.signal,
       body: body === undefined ? undefined : isFormData ? (body as FormData) : JSON.stringify(body)

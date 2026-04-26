@@ -4,7 +4,12 @@ const { startWorker } = require("./src/queue/worker");
 
 async function start() {
   const { worker, queueEvents } = startWorker();
-  bootstrapScheduler();
+  const schedulerEnabled = String(process.env.ENABLE_WORKER_SCHEDULER || "false").trim().toLowerCase() === "true";
+  if (schedulerEnabled) {
+    bootstrapScheduler();
+  } else {
+    logger.info({ service: "worker-service", schedulerEnabled: false }, "worker_scheduler_disabled");
+  }
 
   worker.on("ready", () => {
     logger.info({ service: "worker-service" }, "worker_service_started");

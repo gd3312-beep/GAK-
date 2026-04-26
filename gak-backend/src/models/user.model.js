@@ -133,7 +133,8 @@ async function exportUserData(userId) {
       academiaTimetable,
       academiaMarks,
       academiaAttendance,
-      academicEnrollments
+      academicEnrollments,
+      userSessions
     ] = await Promise.all([
       safeRows(connection, `SELECT user_id, full_name, email, profile_image_url, created_at FROM app_user WHERE user_id = ?`, [userId]),
       safeRows(connection, `SELECT * FROM academic_profile WHERE user_id = ?`, [userId]),
@@ -230,7 +231,8 @@ async function exportUserData(userId) {
          ORDER BY s.subject_name ASC`,
         [userId]
       ),
-      safeRows(connection, `SELECT * FROM academic_enrollment WHERE user_id = ? ORDER BY updated_at DESC`, [userId])
+      safeRows(connection, `SELECT * FROM academic_enrollment WHERE user_id = ? ORDER BY updated_at DESC`, [userId]),
+      safeRows(connection, `SELECT * FROM user_session WHERE user_id = ? ORDER BY created_at DESC`, [userId])
     ]);
 
     return {
@@ -262,7 +264,8 @@ async function exportUserData(userId) {
         academiaTimetable,
         academiaMarks,
         academiaAttendance,
-        academicEnrollments
+        academicEnrollments,
+        userSessions
       }
     };
   } finally {
@@ -321,6 +324,7 @@ async function deleteUserData(userId) {
     await safeExecute(connection, `DELETE FROM calendar_event WHERE user_id = ?`, [userId]);
     await safeExecute(connection, `DELETE FROM google_account WHERE user_id = ?`, [userId]);
     await safeExecute(connection, `DELETE FROM oauth_state_nonce WHERE user_id = ?`, [userId]);
+    await safeExecute(connection, `DELETE FROM user_session WHERE user_id = ?`, [userId]);
     await safeExecute(connection, `DELETE FROM integration_status WHERE user_id = ?`, [userId]);
     await safeExecute(connection, `DELETE FROM food_log WHERE user_id = ?`, [userId]);
     await safeExecute(connection, `DELETE FROM body_metric WHERE user_id = ?`, [userId]);

@@ -38,6 +38,9 @@ router.post("/register", authRateLimit, userController.register);
 router.post("/login", authRateLimit, userController.login);
 router.get("/me", authMiddleware, userController.getProfile);
 router.patch("/me/profile-photo", authMiddleware, (req, res, next) => resolveUploadMiddleware()(req, res, next), userController.updateProfilePhoto);
+router.get("/me/sessions", authMiddleware, userController.listMySessions);
+router.delete("/me/sessions/current", authMiddleware, userController.logoutCurrentSession);
+router.delete("/me/sessions/:sessionId", authMiddleware, userController.revokeSession);
 router.get("/me/export", authMiddleware, userController.exportMyData);
 router.delete("/me", authMiddleware, userController.deleteMyAccount);
 
