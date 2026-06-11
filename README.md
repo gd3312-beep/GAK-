@@ -1,6 +1,5 @@
 # GAK - Gyaan Ahara Karma
-
-GAK is a full-stack student day assistant for managing **academics, fitness, nutrition, and planning** in one connected system.
+GAK is a multimodal behavioral intelligence platform that aggregates academic, fitness, nutritional, and scheduling signals to model student behavior and enable  predictive analytics, and context-aware planning.
 
 It is built around three pillars:
 
