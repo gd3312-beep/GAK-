@@ -1,5 +1,6 @@
 # GAK - Gyaan Ahara Karma
-GAK is a multimodal behavioral intelligence platform that aggregates academic, fitness, nutritional, and scheduling signals to model student behavior and enable  predictive analytics, and context-aware planning.
+GAK is a multimodal behavioral intelligence platform that aggregates academic, fitness, nutritional, and scheduling signals to model student behavior and enable 
+personalized recommendations, predictive analytics, and context-aware planning.
 
 It is built around three pillars:
 
