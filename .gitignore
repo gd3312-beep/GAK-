@@ -3,6 +3,7 @@ node_modules/
 .DS_Store
 gak-backend/tmp/
 gak-backend/uploads/workout-plans/
+gak-backend/uploads/profile-photos/
 gak-backend/backups/
 tmp_*.log
 Frontend/.env

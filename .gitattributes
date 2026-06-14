@@ -1,0 +1,17 @@
+# Ensure consistent line endings across OS
+* text=auto
+
+# Force shell scripts to LF
+*.sh text eol=lf
+
+# Binary files - no line ending conversion
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.svg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.pdf binary
+*.zip binary
