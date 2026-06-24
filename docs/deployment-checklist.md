@@ -1,52 +1,65 @@
-# Deployment Checklist
+# Deployment
 
-## 1. Pre-Deploy Validation
-- Backend tests:
-  - `cd gak-backend && npm test`
-- Frontend quality gate:
-  - `cd Frontend && npm run build && npm run test && npm run lint`
-- API smoke test (backend running at `http://127.0.0.1:4000`):
-  - `cd gak-backend && npm run smoke:api`
+## Local development (Docker)
 
-## 2. Environment Setup
-- Backend production env:
-  - Copy `gak-backend/.env.production.example` to your deployment secret manager.
-  - Set real values for DB, JWT, OAuth, CORS, and job token variables.
-- Frontend production env:
-  - Set `VITE_API_URL` to your backend public URL.
+```sh
+# 1. Clone and copy the env template
+cp gak-backend/.env.example gak-backend/.env
+# Fill in DB credentials, JWT secrets, and Google OAuth fields
 
-## 3. Database Preparation
-- Create/verify `GAK` database on production MySQL.
-- Apply schema:
-  - `cd gak-backend && npm run db:bootstrap`
-- Optional destructive reset (non-production only):
-  - `DB_ALLOW_DESTRUCTIVE=true npm run db:truncate`
+# 2. Start the stack
+docker compose up -d --build
 
-## 4. Deploy (Container Option)
-- Build and start:
-  - `docker compose up -d --build`
-- Verify health:
-  - `curl http://127.0.0.1:4000/health`
+# 3. Bootstrap the database (run once, or after db:truncate)
+docker compose exec backend npm run db:bootstrap
 
-## 5. Deploy (Non-Container Option)
-- Backend:
-  - `cd gak-backend && npm ci && NODE_ENV=production npm start`
-- Frontend:
-  - `cd Frontend && npm ci && npm run build`
-  - Serve `Frontend/dist` behind Nginx/Apache with SPA fallback to `index.html`.
+# 4. Check it's alive
+curl http://localhost:4000/health
+```
 
-## 6. Post-Deploy Checks
-- Authenticate in UI and hit core journeys:
-  - login/register
-  - planner/timetable
-  - marks and attendance views
-  - integrations status pages
-- Watch backend logs for:
-  - CORS rejections
-  - auth failures
-  - scheduler errors
+Frontend is served at `http://localhost:8080`.
+Backend API at `http://localhost:4000`.
 
-## 7. Security Guardrails
-- Never commit real `.env` values.
-- Keep `.env.local` / `.env.production.local` untracked.
-- Rotate JWT/OAuth/token encryption secrets on any suspected exposure.
+## Running without Docker
+
+```sh
+# Backend
+cd gak-backend
+npm install
+npm run db:bootstrap   # needs a running MySQL at DB_HOST
+npm run dev            # nodemon
+
+# Frontend
+cd Frontend
+npm install
+npm run dev            # vite dev server at :5173
+```
+
+## Tests
+
+```sh
+cd gak-backend
+npm test               # jest unit tests
+npm run smoke:api      # end-to-end smoke against a running backend
+```
+
+## Playwright requirement
+
+The academia scraper uses Playwright. First run installs the browser:
+
+```sh
+npx playwright install chromium
+```
+
+Or in Docker — the Dockerfile handles this during build.
+
+## Production deployment
+
+1. Set real values for all required env vars from `.env.production.example`
+2. Rotate: `JWT_SECRET`, `GOOGLE_TOKEN_SECRET`, `TOKEN_ENCRYPTION_KEYS`, `OAUTH_STATE_SECRET`
+3. Set `ENFORCE_HTTPS=true`, `NODE_ENV=production`
+4. `docker compose up -d --build`
+5. `docker compose exec backend npm run db:bootstrap`
+
+The `JOBS_ADMIN_TOKEN` variable gates `/api/jobs/*` endpoints. Set it to a
+strong random string and keep it out of public repos.
