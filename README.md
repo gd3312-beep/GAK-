@@ -261,8 +261,9 @@ Do not commit real `.env` files or secrets.
 
 ## Documentation
 
-- `docs/architecture-and-operations.md`
-- `docs/deployment-checklist.md`
-- `gak-backend/docs/OPERATIONS_READINESS.md`
-- `gak-backend/docs/PRIVACY_POLICY.md`
-- `gak-backend/docs/TERMS_OF_SERVICE.md`
+- [docs/NOTES.md](docs/NOTES.md) — engineering decisions, load-test findings, known issues
+- [docs/architecture-and-operations.md](docs/architecture-and-operations.md) — stack, auth flow, DB schema map
+- [docs/deployment-checklist.md](docs/deployment-checklist.md) — setup and deployment runbook
+- [CONTRIBUTING.md](CONTRIBUTING.md) — how to run the project locally and open a PR
+- [gak-backend/docs/PRIVACY_POLICY.md](gak-backend/docs/PRIVACY_POLICY.md)
+- [gak-backend/docs/TERMS_OF_SERVICE.md](gak-backend/docs/TERMS_OF_SERVICE.md)
