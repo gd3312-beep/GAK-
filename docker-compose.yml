@@ -10,6 +10,12 @@ services:
       - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
 
   backend:
     build:
@@ -18,7 +24,8 @@ services:
     container_name: gak-backend
     restart: unless-stopped
     depends_on:
-      - mysql
+      mysql:
+        condition: service_healthy
     env_file:
       - ./gak-backend/.env.production.example
     environment:
@@ -30,6 +37,8 @@ services:
       HOST: 0.0.0.0
     ports:
       - "4000:4000"
+    volumes:
+      - backend_uploads:/app/uploads
 
   frontend:
     build:
@@ -44,3 +53,4 @@ services:
 
 volumes:
   mysql_data:
+  backend_uploads:
